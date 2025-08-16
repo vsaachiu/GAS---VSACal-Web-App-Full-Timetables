@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Schoogle</title>
+    <?!= include('CSS'); ?>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>Schoogle</h1>
+        <h2>Put your timetable onto Google Calendar</h2>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab-btn active" data-tab="addTab">Add</button>
+        <button class="tab-btn" data-tab="viewTab">View</button>
+      </nav>
+
+      <main>
+        <section id="addTab" class="tab-content active">
+          <div id="formSection">
+            <div class="form-rows" id="formRows">
+              <div class="form-row header">
+                <label>Day</label>
+                <label>Period</label>
+                <label>Title</label>
+                <label>Location</label>
+                <label>Actions</label>
+              </div>
+              <!-- Template Row (hidden) -->
+              <div class="form-row" id="rowTemplate" data-template="true" style="display:none;">
+                <select class="day-select">
+                  <option value="">Select Day</option>
+                  <option>Day 1</option>
+                  <option>Day 2</option>
+                  <option>Day 3</option>
+                  <option>Day 4</option>
+                  <option>Day 5</option>
+                  <option>Day 6</option>
+                  <option>Day 7</option>
+                  <option>Day 8</option>
+                  <option>Day 9</option>
+                  <option>Day 10</option>
+                </select>
+                <select class="period-select">
+                  <option value="">Select Period</option>
+                </select>
+                <input class="title-input" type="text" placeholder="Class Title" />
+                <input class="location-input" type="text" placeholder="Location" />
+                <div class="row-actions">
+                  <button type="button" class="btn danger mini delete-row-btn">Delete</button>
+                </div>
+              </div>
+            </div>
+            <div class="calendar-picker" style="margin-top:8px;">
+              <label>Date window</label>
+              <input id="fromDate" type="date" />
+              <span style="color:#9ca3af;">to</span>
+              <input id="toDate" type="date" />
+            </div>
+            <div class="controls">
+              <button id="addRowBtn" class="btn icon">＋</button>
+              <button id="previewBtn" class="btn primary">Preview Events</button>
+            </div>
+          </div>
+
+          <div id="previewSection" style="display:none;">
+            <div id="previewMeta" class="preview-meta"></div>
+            <div id="previewList" class="collapsible-list"></div>
+            <div class="calendar-picker" style="margin-top:10px;">
+              <label for="calendarSelect">Target calendar</label>
+              <select id="calendarSelect"></select>
+              <input id="newCalendarName" type="text" placeholder="New calendar name" style="display:none;" />
+            </div>
+            <div class="controls">
+              <button id="backToFormBtn" class="btn">Back to form</button>
+              <button id="createBtn" class="btn success">Create Events</button>
+              <span id="createProgress" class="progress-text" style="display:none;"></span>
+            </div>
+          </div>
+        </section>
+
+        <section id="viewTab" class="tab-content">
+          <div class="calendar-picker">
+            <label for="viewCalendarSelect">Calendar</label>
+            <select id="viewCalendarSelect"></select>
+          </div>
+          <div id="viewList" class="collapsible-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="spinner" class="spinner-overlay" style="display:none;">
+      <div class="spinner"></div>
+      <div class="spinner-text">Working…</div>
+    </div>
+
+    <?!= include('JavaScript'); ?>
+  </body>
+</html>

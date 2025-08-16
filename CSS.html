@@ -1,0 +1,67 @@
+<style>
+:root {
+  --bg: #0f172a;
+  --panel: #111827;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --primary: #3b82f6;
+  --success: #10b981;
+  --danger: #ef4444;
+  --border: #1f2937;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+
+.container { max-width: 1000px; margin: 0 auto; padding: 24px; }
+header h1 { margin: 0; font-size: 28px; }
+header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
+
+.tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.tab-btn { background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; cursor: pointer; }
+.tab-btn.active { background: var(--primary); border-color: var(--primary); }
+
+.tab-content { display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.tab-content.active { display: block; }
+
+.form-rows { display: grid; gap: 8px; }
+.form-row { display: grid; grid-template-columns: 140px 1fr 1.4fr 1fr auto; gap: 8px; }
+.form-row.header { color: var(--muted); font-size: 12px; }
+.form-row select, .form-row input { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: #0b1220; color: var(--text); }
+.row-actions { display: flex; justify-content: flex-end; }
+
+.controls { margin-top: 12px; display: flex; gap: 10px; align-items: center; }
+.btn { background: #0b1220; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+.btn.primary { background: var(--primary); border-color: var(--primary); }
+.btn.success { background: var(--success); border-color: var(--success); }
+.btn.danger { background: var(--danger); border-color: var(--danger); }
+.btn.mini { padding: 6px 10px; font-size: 12px; }
+.btn.icon { width: 44px; }
+
+.preview-meta { margin: 6px 0 12px; color: var(--muted); }
+
+.collapsible-list details { border: 1px solid var(--border); border-radius: 8px; margin: 10px 0; background: #0b1220; }
+.collapsible-list summary { cursor: pointer; list-style: none; padding: 10px 12px; font-weight: 600; }
+.collapsible-list .event-list { list-style: none; margin: 0; padding: 10px 12px 12px; display: grid; gap: 10px; }
+.event-item { display: grid; grid-template-columns: 1fr 0.9fr auto; gap: 10px; align-items: center; }
+.event-time-edit { display: flex; gap: 8px; align-items: center; }
+.event-time { color: var(--muted); font-size: 14px; }
+.event-title-edit { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: #0f1525; color: var(--text); width: 100%; }
+
+/* Make date/time inputs in preview match site styling */
+.event-time-edit input[type="date"], .event-time-edit input[type="time"] {
+  padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: #0f1525; color: var(--text);
+}
+.event-time-edit .time-sep { color: var(--muted); padding: 0 8px; }
+
+.calendar-picker { margin: 10px 0; display: flex; gap: 8px; align-items: center; }
+.calendar-picker select, .calendar-picker input { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: #0b1220; color: var(--text); }
+/* Limit calendar select width so it doesn't stretch the layout */
+.calendar-picker select { max-width: 360px; min-width: 220px; }
+
+.spinner-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; z-index: 9999; }
+.spinner { width: 36px; height: 36px; border: 3px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; }
+.spinner-text { color: var(--muted); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>

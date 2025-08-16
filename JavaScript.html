@@ -1,0 +1,615 @@
+<script>
+(function() {
+  const state = {
+    periods: [],
+    previewEvents: [],
+    calendars: [],
+  };
+
+  // Toggle to disable summarization and log full RPC payloads (set true while debugging)
+  // Ensure global flag exists and default to false
+  window.RPC_DEBUG = (window && window.RPC_DEBUG) || false;
+  // Helper to toggle at runtime from console: window.setRpcDebug(true)
+  window.setRpcDebug = function(v) { window.RPC_DEBUG = !!v; console.log('setRpcDebug ->', window.RPC_DEBUG); };
+  // Alias with different casing because console users sometimes use SET/ALLCAPS
+  window.setRPCDebug = window.setRpcDebug;
+
+  // --- RPC helper: logs every server request/response with timing ---
+  function summarize(val, path = '') {
+    try {
+      if (val == null) return val;
+      if (typeof val === 'string') return val.length > 500 ? val.slice(0, 500) + '…' : val;
+      if (Array.isArray(val)) return { type: 'Array', length: val.length, sample: val.slice(0, 5) };
+      if (typeof val === 'object') {
+        const out = {}; let c = 0;
+        for (const k of Object.keys(val)) { if (c++ >= 10) break; out[k] = summarize(val[k], path + '.' + k); }
+        return out;
+      }
+      return val;
+    } catch (e) { return '[unserializable]'; }
+  }
+
+  function rpc(name, ...args) {
+    const id = Math.random().toString(36).slice(2, 8);
+    const start = (window.performance && performance.now ? performance.now() : Date.now());
+    // When RPC_DEBUG is true, log full request bodies; otherwise use summarized output.
+    try {
+      const reqLog = (window && window.RPC_DEBUG) ? args : summarize(args);
+      console.log(`[RPC:${name}#${id}] Request`, reqLog);
+    } catch (e) { console.log(`[RPC:${name}#${id}] Request (unserializable)`, args); }
+    return new Promise((resolve, reject) => {
+      try {
+        google.script.run
+          .withSuccessHandler(result => {
+            const dur = Math.round(((window.performance && performance.now ? performance.now() : Date.now()) - start));
+            try {
+              const resLog = (window && window.RPC_DEBUG) ? result : summarize(result);
+              console.log(`[RPC:${name}#${id}] Success in ${dur}ms`, resLog);
+            } catch (e) { console.log(`[RPC:${name}#${id}] Success in ${dur}ms (unserializable)`, result); }
+            resolve(result);
+          })
+          .withFailureHandler(err => {
+            const dur = Math.round(((window.performance && performance.now ? performance.now() : Date.now()) - start));
+            try {
+              const errLog = (window && window.RPC_DEBUG) ? err : summarize(err);
+              console.error(`[RPC:${name}#${id}] Failure in ${dur}ms`, errLog);
+            } catch (e) { console.error(`[RPC:${name}#${id}] Failure in ${dur}ms (unserializable)`, err); }
+            reject(err);
+          })[name](...args);
+      } catch (err) {
+        console.error(`[RPC:${name}#${id}] Invocation error`, err);
+        reject(err);
+      }
+    });
+  }
+
+  function showSpinner(show) {
+    document.getElementById('spinner').style.display = show ? 'flex' : 'none';
+  console.debug('Spinner', { show });
+  }
+
+  function switchTab(tabId) {
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabId));
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.toggle('active', el.id === tabId));
+  console.debug('switchTab()', { tabId });
+  }
+
+  // Build a new form row
+  function addRow(prefill) {
+    const template = document.getElementById('rowTemplate');
+    const row = template.cloneNode(true);
+    row.removeAttribute('id');
+    row.removeAttribute('data-template');
+    row.style.display = '';
+
+    // Populate period options
+    const periodSelect = row.querySelector('.period-select');
+    periodSelect.innerHTML = '<option value="">Select Period</option>' + state.periods.map(p => `<option value="${p.id}">${p.text}</option>`).join('');
+
+    if (prefill) {
+      if (prefill.day) row.querySelector('.day-select').value = prefill.day;
+      if (prefill.periodId) periodSelect.value = prefill.periodId;
+      if (prefill.title) row.querySelector('.title-input').value = prefill.title;
+      if (prefill.location) row.querySelector('.location-input').value = prefill.location;
+    }
+  console.debug('addRow()', { prefill });
+
+    // Enable delete button for this form row
+    const delBtn = row.querySelector('.delete-row-btn');
+    if (delBtn) {
+      delBtn.addEventListener('click', () => row.remove());
+    }
+
+    document.getElementById('formRows').appendChild(row);
+  }
+
+  function collectFormData() {
+    const rows = Array.from(document.querySelectorAll('#formRows .form-row'))
+      .filter(r => !r.dataset.template && !r.classList.contains('header'));
+    const out = [];
+    for (const r of rows) {
+      const dayEl = r.querySelector('.day-select');
+      const periodEl = r.querySelector('.period-select');
+      const titleEl = r.querySelector('.title-input');
+      const locEl = r.querySelector('.location-input');
+      if (!dayEl || !periodEl || !titleEl || !locEl) continue;
+      const item = {
+        day: dayEl.value,
+        periodId: periodEl.value,
+        title: titleEl.value,
+        location: locEl.value,
+      };
+      out.push(item);
+    }
+  const filtered = out.filter(x => x.day && x.periodId && x.title);
+  return filtered;
+  }
+
+  function groupByTitle(events) {
+    const groups = {};
+    events.forEach(ev => {
+      if (!groups[ev.title]) groups[ev.title] = [];
+      groups[ev.title].push(ev);
+    });
+    return groups;
+  }
+
+  function fmt(dt) {
+    try {
+      const d = new Date(dt);
+      return d.toLocaleString();
+    } catch(e) { return dt; }
+  }
+
+  function renderPreview() {
+    const list = document.getElementById('previewList');
+    list.innerHTML = '';
+    const groups = groupByTitle(state.previewEvents);
+    const titles = Object.keys(groups).sort();
+  console.debug('renderPreview()', { total: state.previewEvents.length, titles, groupsSample: titles.slice(0,3).reduce((acc,t)=>{acc[t]=groups[t].length;return acc;}, {}) });
+
+    titles.forEach(title => {
+      const events = groups[title];
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = `${title} (${events.length} events)`;
+      details.appendChild(summary);
+
+      const ul = document.createElement('ul');
+      ul.className = 'event-list';
+
+      events.forEach((ev, idx) => {
+        const li = document.createElement('li');
+        li.className = 'event-item';
+        li.dataset.schoogleEventId = ev.schoogleEventId;
+
+        const timeWrapper = document.createElement('div');
+        timeWrapper.className = 'event-time-edit';
+
+        // Single date input (applies to both start and end dates)
+        const dateInput = document.createElement('input');
+        dateInput.type = 'date';
+        dateInput.value = ev.startDate || (ev.startDateTime ? new Date(ev.startDateTime).toISOString().slice(0,10) : '');
+        dateInput.addEventListener('change', () => {
+          ev.startDate = dateInput.value;
+          ev.endDate = dateInput.value;
+          // recompute datetimes if times are present
+          if (ev.startDate && ev.startTime) ev.startDateTime = new Date(ev.startDate + 'T' + ev.startTime + ':00').toISOString();
+          if (ev.endDate && ev.endTime) ev.endDateTime = new Date(ev.endDate + 'T' + ev.endTime + ':00').toISOString();
+          updatePreviewMeta();
+        });
+
+        // Start time input
+        const startTimeInput = document.createElement('input');
+        startTimeInput.type = 'time';
+        startTimeInput.step = 60;
+        startTimeInput.value = ev.startTime || (ev.startDateTime ? new Date(ev.startDateTime).toTimeString().slice(0,5) : '');
+        startTimeInput.addEventListener('change', () => {
+          ev.startTime = startTimeInput.value;
+          if (ev.startDate && ev.startTime) {
+            ev.startDateTime = new Date(ev.startDate + 'T' + ev.startTime + ':00').toISOString();
+          }
+          updatePreviewMeta();
+        });
+
+        // Separator
+        const sep = document.createElement('span'); sep.textContent = ' → '; sep.className = 'time-sep';
+
+  // End date is driven by the single dateInput above, so we no longer render a separate end date input
+
+        const endTimeInput = document.createElement('input');
+        endTimeInput.type = 'time';
+        endTimeInput.step = 60;
+        endTimeInput.value = ev.endTime || (ev.endDateTime ? new Date(ev.endDateTime).toTimeString().slice(0,5) : '');
+        endTimeInput.addEventListener('change', () => {
+          ev.endTime = endTimeInput.value;
+          if (ev.endDate && ev.endTime) {
+            ev.endDateTime = new Date(ev.endDate + 'T' + ev.endTime + ':00').toISOString();
+          }
+          updatePreviewMeta();
+        });
+
+  timeWrapper.appendChild(dateInput);
+        timeWrapper.appendChild(startTimeInput);
+        timeWrapper.appendChild(sep);
+        timeWrapper.appendChild(endTimeInput);
+
+        const titleInput = document.createElement('input');
+        titleInput.type = 'text';
+        titleInput.value = ev.title;
+        titleInput.className = 'event-title-edit';
+        titleInput.addEventListener('input', () => { ev.title = titleInput.value; });
+
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.textContent = 'Delete';
+        delBtn.className = 'btn danger mini';
+        // Prevent clicks from bubbling to the <details> which toggles it
+        delBtn.addEventListener('pointerdown', e => { if (e && e.stopPropagation) e.stopPropagation(); });
+        delBtn.addEventListener('click', (evclick) => {
+          if (evclick && evclick.stopPropagation) evclick.stopPropagation();
+          if (evclick && evclick.preventDefault) evclick.preventDefault();
+          // remove from state and re-render
+          state.previewEvents = state.previewEvents.filter(x => x !== ev);
+          renderPreview();
+          updatePreviewMeta();
+        });
+
+  li.appendChild(timeWrapper);
+        li.appendChild(titleInput);
+        li.appendChild(delBtn);
+        ul.appendChild(li);
+      });
+
+      details.appendChild(ul);
+      list.appendChild(details);
+    });
+  }
+
+  function updatePreviewMeta() {
+    const meta = document.getElementById('previewMeta');
+    const n = state.previewEvents.length;
+    meta.textContent = `Total events to create: ${n}. Estimated time ~ ${n}s.`;
+  }
+
+  function populateCalendars(selectEl, calendars) {
+    selectEl.innerHTML = '';
+    const optNew = document.createElement('option');
+    optNew.value = '__new__';
+    optNew.textContent = '➕ Create new calendar…';
+
+    calendars.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id; opt.textContent = c.name;
+      selectEl.appendChild(opt);
+    });
+    selectEl.appendChild(optNew);
+  }
+
+  function loadCalendars() {
+    showSpinner(true);
+    rpc('getCalendarList')
+      .then(cals => {
+        state.calendars = cals || [];
+        populateCalendars(document.getElementById('calendarSelect'), state.calendars);
+        populateCalendars(document.getElementById('viewCalendarSelect'), state.calendars);
+        console.debug('Calendars loaded', { count: state.calendars.length, sample: state.calendars.slice(0,5) });
+      })
+      .catch(err => {
+        console.error('getCalendarList failed', err);
+      })
+      .finally(() => showSpinner(false));
+  }
+
+  function init() {
+    // Tabs
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    // Add row
+    document.getElementById('addRowBtn').addEventListener('click', () => addRow());
+
+    // Preview
+  document.getElementById('previewBtn').addEventListener('click', () => {
+      const data = collectFormData();
+      if (!data.length) { alert('Please enter at least one row.'); return; }
+  const from = document.getElementById('fromDate').value;
+  const to = document.getElementById('toDate').value;
+      // Snapshot all rows (including partial) for debugging
+      const rowsSnapshot = Array.from(document.querySelectorAll('#formRows .form-row'))
+        .filter(r => !r.dataset.template && !r.classList.contains('header'))
+        .map(r => ({
+          day: (r.querySelector('.day-select')||{}).value || '',
+          periodId: (r.querySelector('.period-select')||{}).value || '',
+          title: (r.querySelector('.title-input')||{}).value || '',
+          location: (r.querySelector('.location-input')||{}).value || ''
+        }));
+      console.debug('Preview click', { from, to, inputRowsCount: data.length, inputRowsSample: data.slice(0,5), allRowsSnapshotSample: rowsSnapshot.slice(0,5) });
+      showSpinner(true);
+      rpc('generatePreviewEvents', { items: data, from, to })
+        .then(evts => {
+          // Debug: log raw full payload (RPC_DEBUG will show full bodies; otherwise this still helps)
+          console.log('Generated Events (raw):', evts);
+
+          // Defensive normalization: server may return an array or an object like { results: [...] }.
+          let normalized = [];
+          try {
+            if (Array.isArray(evts)) {
+              normalized = evts;
+            } else if (evts && Array.isArray(evts.results)) {
+              normalized = evts.results;
+            } else if (evts && Array.isArray(evts.events)) {
+              normalized = evts.events;
+            } else if (evts && evts.data && Array.isArray(evts.data.results)) {
+              normalized = evts.data.results;
+            } else if (evts && typeof evts === 'object') {
+              // Fallback: pick the first array-valued property if present
+              for (const k of Object.keys(evts)) {
+                if (Array.isArray(evts[k])) { normalized = evts[k]; break; }
+              }
+            }
+          } catch (e) { console.warn('Normalization error', e); }
+
+          // Ensure dates are printable strings and expose separate date/time fields for editing
+          normalized = (normalized || []).map(item => {
+            if (!item || typeof item !== 'object') return item;
+            const copy = Object.assign({}, item);
+            // Normalize start/end to ISO strings if Date objects
+            try { if (copy.startDateTime && copy.startDateTime.toISOString) copy.startDateTime = copy.startDateTime.toISOString(); } catch(e) {}
+            try { if (copy.endDateTime && copy.endDateTime.toISOString) copy.endDateTime = copy.endDateTime.toISOString(); } catch(e) {}
+
+            // Derive separate editable fields: startDate, startTime, endDate, endTime
+            try {
+              if (copy.startDateTime) {
+                const sdt = new Date(copy.startDateTime);
+                if (!isNaN(sdt.getTime())) {
+                  // yyyy-mm-dd and HH:MM (24h)
+                  copy.startDate = sdt.toISOString().slice(0,10);
+                  copy.startTime = sdt.toTimeString().slice(0,5);
+                }
+              }
+            } catch(e) {}
+            try {
+              if (copy.endDateTime) {
+                const edt = new Date(copy.endDateTime);
+                if (!isNaN(edt.getTime())) {
+                  copy.endDate = edt.toISOString().slice(0,10);
+                  copy.endTime = edt.toTimeString().slice(0,5);
+                }
+              }
+            } catch(e) {}
+
+            return copy;
+          });
+
+          console.log('Generated Events (normalized):', { count: normalized.length, sample: normalized.slice(0,5), type: Object.prototype.toString.call(evts) });
+          state.previewEvents = normalized || [];
+          console.debug('generatePreviewEvents -> success', { count: state.previewEvents.length, sample: state.previewEvents.slice(0,5) });
+          document.getElementById('formSection').style.display = 'none';
+          document.getElementById('previewSection').style.display = '';
+          updatePreviewMeta();
+          renderPreview();
+          if (!state.previewEvents.length) {
+            console.warn('No events generated. Check your date window, selected days, and DayTimes mappings.');
+          }
+        })
+        .catch(err => {
+          console.error('generatePreviewEvents failed', err);
+        })
+        .finally(() => showSpinner(false));
+    });
+
+    // Create
+    document.getElementById('createBtn').addEventListener('click', () => {
+      if (!state.previewEvents.length) { alert('No events to create.'); return; }
+      const calSel = document.getElementById('calendarSelect');
+      let calendarId = calSel.value;
+      const newNameEl = document.getElementById('newCalendarName');
+
+      const createRunner = () => {
+        const progress = document.getElementById('createProgress');
+        progress.style.display = '';
+        progress.textContent = `Enqueuing job for ${state.previewEvents.length} events…`;
+        document.getElementById('createBtn').disabled = true;
+        showSpinner(true);
+        // Prepare payload: compute startDateTime/endDateTime ISO strings from editable fields
+        const payloadEvents = state.previewEvents.map(ev => {
+          const copy = Object.assign({}, ev);
+          const sDate = copy.startDate || '';
+          const sTime = copy.startTime || '';
+          const eDate = copy.endDate || copy.startDate || '';
+          const eTime = copy.endTime || '';
+          try { if (sDate && sTime) copy.startDateTime = new Date(sDate + 'T' + sTime + ':00').toISOString(); } catch(e) {}
+          try { if (eDate && eTime) copy.endDateTime = new Date(eDate + 'T' + eTime + ':00').toISOString(); } catch(e) {}
+          return copy;
+        });
+
+        // Enqueue job on server
+        rpc('enqueueJob', payloadEvents, calendarId)
+          .then(jobId => {
+            console.debug('Job enqueued', { jobId });
+            progress.textContent = `Job queued: ${jobId}. Polling for status…`;
+            // start polling
+            pollJobStatus(jobId, calendarId);
+          })
+          .catch(err => {
+            console.error('enqueueJob failed', err);
+            document.getElementById('createBtn').disabled = false;
+          })
+          .finally(() => showSpinner(false));
+      };
+
+      if (calendarId === '__new__') {
+        const name = newNameEl.value.trim();
+        if (!name) { alert('Enter a new calendar name.'); return; }
+        showSpinner(true);
+        rpc('createNewCalendar', name)
+          .then(id => {
+            calendarId = id;
+            loadCalendars();
+            createRunner();
+          });
+      } else {
+        createRunner();
+      }
+    });
+
+    // Polling helper: polls getJobStatus until done and updates UI
+    function pollJobStatus(jobId, calendarId) {
+      const progress = document.getElementById('createProgress');
+      let pollInterval = 5000; // 5s
+      let stopped = false;
+      function tick() {
+        if (stopped) return;
+        rpc('getJobStatus', jobId)
+          .then(status => {
+            if (!status) return;
+            const s = status.status || 'unknown';
+            const done = (status.progress && status.progress.done) || 0;
+            const total = (status.progress && status.progress.total) || 0;
+            progress.textContent = `Job ${jobId}: ${s} — ${done}/${total}`;
+            if (s === 'done') {
+              stopped = true;
+              document.getElementById('createBtn').disabled = false;
+              if (status.reportUrl) {
+                progress.textContent = `Done. Report: ${status.reportUrl}`;
+                switchTab('viewTab');
+                document.getElementById('viewCalendarSelect').value = calendarId;
+                loadViewEvents(calendarId);
+              } else {
+                progress.textContent = `Done.`;
+              }
+              return;
+            }
+            if (s === 'error' || s === 'notfound') {
+              stopped = true; document.getElementById('createBtn').disabled = false; return;
+            }
+            setTimeout(tick, pollInterval);
+          })
+          .catch(err => {
+            console.error('pollJobStatus failed', err);
+            stopped = true;
+            document.getElementById('createBtn').disabled = false;
+          });
+      }
+      tick();
+    }
+
+    // Back to form from preview
+    document.getElementById('backToFormBtn').addEventListener('click', () => {
+      document.getElementById('previewSection').style.display = 'none';
+      document.getElementById('formSection').style.display = '';
+      // Keep current rows; user can edit and re-preview
+  console.debug('Back to form clicked');
+    });
+
+    // New calendar select behavior
+    document.getElementById('calendarSelect').addEventListener('change', (e) => {
+      const val = e.target.value;
+      document.getElementById('newCalendarName').style.display = (val === '__new__') ? '' : 'none';
+    });
+
+    // View tab calendar select
+    document.getElementById('viewCalendarSelect').addEventListener('change', (e) => {
+      const id = e.target.value;
+      if (id) loadViewEvents(id);
+    });
+
+    // Initial data load
+    showSpinner(true);
+    console.debug('init() starting');
+    rpc('getInitialData')
+      .then(data => {
+        state.periods = data.periods || [];
+        // If timetable exists, sort by title then day and use it to populate rows, overwriting the initial blank.
+        if (data.userTimetable && data.userTimetable.length) {
+          const ut = (data.userTimetable || []).slice().sort((a, b) => {
+            const ta = (a.title || '').toString();
+            const tb = (b.title || '').toString();
+            const cmp = ta.localeCompare(tb);
+            if (cmp !== 0) return cmp;
+            const da = (a.day || '').toString();
+            const db = (b.day || '').toString();
+            return da.localeCompare(db);
+          });
+          // Populate rows in sorted order
+          for (let i = 0; i < ut.length; i++) addRow(ut[i]);
+        } else {
+          addRow();
+        }
+        console.debug('Initial data loaded', { periodsCount: state.periods.length, userTimetableCount: (data.userTimetable||[]).length, defaultFrom: data.defaultFrom, defaultTo: data.defaultTo });
+        if (data.defaultFrom) document.getElementById('fromDate').value = data.defaultFrom;
+        if (data.defaultTo) document.getElementById('toDate').value = data.defaultTo;
+        loadCalendars();
+      })
+      .catch(err => {
+        console.error('getInitialData failed', err);
+      })
+      .finally(() => showSpinner(false));
+  }
+
+  function renderViewEvents(events) {
+    const list = document.getElementById('viewList');
+    list.innerHTML = '';
+    const groups = groupByTitle(events);
+    const titles = Object.keys(groups).sort();
+
+    titles.forEach(title => {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = `${title} (${groups[title].length})`;
+      details.appendChild(summary);
+
+      const ul = document.createElement('ul');
+      ul.className = 'event-list';
+
+      groups[title].forEach(ev => {
+        const li = document.createElement('li');
+        li.className = 'event-item';
+
+        const timeSpan = document.createElement('span');
+        timeSpan.className = 'event-time';
+        timeSpan.textContent = `${fmt(ev.start)} → ${fmt(ev.end)}`;
+
+        const openLink = document.createElement('a');
+        openLink.href = ev.htmlLink; openLink.target = '_blank';
+        openLink.textContent = 'Open';
+
+        const editBtn = document.createElement('button');
+        editBtn.textContent = 'Edit';
+        editBtn.className = 'btn mini';
+        editBtn.addEventListener('click', () => {
+          const newTitle = prompt('New title', ev.title);
+          if (!newTitle) return;
+          showSpinner(true);
+          rpc('updateCalendarEvent', document.getElementById('viewCalendarSelect').value, ev.id, newTitle)
+            .then(() => {
+              ev.title = newTitle;
+              renderViewEvents(events);
+            })
+            .catch(err => console.error('updateCalendarEvent failed', err))
+            .finally(() => showSpinner(false));
+        });
+
+        const delBtn = document.createElement('button');
+        delBtn.textContent = 'Delete';
+        delBtn.className = 'btn danger mini';
+        delBtn.addEventListener('click', () => {
+          if (!confirm('Delete this event?')) return;
+          showSpinner(true);
+          rpc('deleteCalendarEvent', document.getElementById('viewCalendarSelect').value, ev.id)
+            .then(() => {
+              const idx = events.indexOf(ev);
+              if (idx > -1) events.splice(idx, 1);
+              renderViewEvents(events);
+            })
+            .catch(err => console.error('deleteCalendarEvent failed', err))
+            .finally(() => showSpinner(false));
+        });
+
+        li.appendChild(timeSpan);
+        li.appendChild(openLink);
+        li.appendChild(editBtn);
+        li.appendChild(delBtn);
+        ul.appendChild(li);
+      });
+
+      details.appendChild(ul);
+      list.appendChild(details);
+    });
+  }
+
+  function loadViewEvents(calendarId) {
+    showSpinner(true);
+    rpc('getEventsFromCalendar', calendarId)
+      .then(events => {
+        renderViewEvents(events || []);
+      })
+      .catch(err => console.error('getEventsFromCalendar failed', err))
+      .finally(() => showSpinner(false));
+  }
+
+  window.addEventListener('load', init);
+})();
+</script>
