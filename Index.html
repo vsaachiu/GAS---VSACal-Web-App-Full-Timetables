@@ -16,18 +16,19 @@
       <nav class="tabs">
         <button class="tab-btn active" data-tab="addTab">Add</button>
         <button class="tab-btn" data-tab="viewTab">View</button>
-  <button class="tab-btn" data-tab="jobsTab">Jobs</button>
+  <button class="tab-btn" data-tab="jobsTab">Active Jobs <span id="jobsNotificationCount" class="notification-count">0</span></button>
       </nav>
 
       <main>
         <section id="addTab" class="tab-content active">
           <div id="formSection">
+            <div class="section-instructions">Enter rows for your timetable (day, period, title, location). When ready, pick a date window and click "Preview Events" to review before creating.</div>
             <div class="form-rows" id="formRows">
               <div class="form-row header">
-                <label>Day</label>
-                <label>Period</label>
-                <label>Title</label>
-                <label>Location</label>
+                  <label data-sort-key="day">Day</label>
+                  <label data-sort-key="periodId">Period</label>
+                  <label data-sort-key="title">Title</label>
+                  <label data-sort-key="location">Location</label>
                 <label>Actions</label>
               </div>
               <!-- Template Row (hidden) -->
@@ -65,9 +66,17 @@
               <button id="addRowBtn" class="btn icon">＋</button>
               <button id="previewBtn" class="btn primary">Preview Events</button>
             </div>
+            <div style="margin-top:10px;">
+              <button id="showLoadOtherBtn" class="btn mini">Load other timetable</button>
+              <div id="otherLoadWrap" style="display:none; margin-top:8px;">
+                <select id="otherTeacherSelect" style="min-width:320px;"></select>
+                <button id="loadOtherBtn" class="btn mini" style="margin-left:8px;">Load other timetable</button>
+              </div>
+            </div>
           </div>
 
           <div id="previewSection" style="display:none;">
+            <div class="section-instructions">Review generated events below. You can edit dates/times inline, delete individual items, then choose a target calendar and click "Create Events" to enqueue the job.</div>
             <div id="previewMeta" class="preview-meta"></div>
             <div id="previewList" class="collapsible-list"></div>
             <div class="calendar-picker" style="margin-top:10px;">
@@ -84,6 +93,7 @@
         </section>
 
         <section id="viewTab" class="tab-content">
+          <div class="section-instructions">Select a calendar to list Schoogle-created events. Use the edit or delete buttons to adjust events. Group-level delete shows a confirmation list so you can pick which instances to remove.</div>
           <div class="calendar-picker">
             <label for="viewCalendarSelect">Calendar</label>
             <select id="viewCalendarSelect"></select>
@@ -92,7 +102,38 @@
         </section>
 
         <section id="jobsTab" class="tab-content">
-          <div id="jobsList">Loading jobs…</div>
+          <div class="section-instructions">Monitor your event creation jobs. Jobs run automatically in the background using your account credentials.</div>
+          
+          <div class="controls" style="margin-bottom:16px;">
+            <button id="openSchoogleBtn" class="btn primary mini" style="display:none;">📊 Open Schoogle Spreadsheet</button>
+          </div>
+
+          <!-- Queued Jobs Section -->
+          <div class="jobs-section">
+            <h3>📋 Queued Jobs <span id="queuedCount" class="count-badge">0</span></h3>
+            <div id="queuedJobsList" class="jobs-list">
+              <div class="no-jobs">No jobs queued</div>
+            </div>
+          </div>
+
+          <!-- Running Jobs Section -->
+          <div class="jobs-section">
+            <h3>⚡ Running Jobs <span id="runningCount" class="count-badge">0</span></h3>
+            <div id="runningJobsList" class="jobs-list">
+              <div class="no-jobs">No jobs running</div>
+            </div>
+          </div>
+
+          <!-- Completed Jobs Section -->
+          <div class="jobs-section">
+            <h3 class="collapsible-header" onclick="toggleCompletedJobs()">
+              ✅ Completed Jobs <span id="completedCount" class="count-badge">0</span>
+              <span id="completedToggle" class="toggle-icon">▼</span>
+            </h3>
+            <div id="completedJobsList" class="jobs-list" style="display:none;">
+              <div class="no-jobs">No completed jobs</div>
+            </div>
+          </div>
         </section>
       </main>
     </div>
