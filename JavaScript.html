@@ -141,6 +141,21 @@
     } catch(e) { return dt; }
   }
 
+  function updateWorkerStatus(installed) {
+    const el = document.getElementById('workerStatus');
+    if (!el) return;
+    try {
+      if (typeof installed === 'undefined') installed = !!localStorage.getItem('schoogle_worker_installed');
+    } catch (e) { installed = false; }
+    if (installed) {
+      el.textContent = 'Worker installed';
+      el.style.color = 'green';
+    } else {
+      el.textContent = 'Worker not installed';
+      el.style.color = '#c33';
+    }
+  }
+
   function renderPreview() {
     const list = document.getElementById('previewList');
     list.innerHTML = '';
@@ -290,6 +305,52 @@
     // Add row
     document.getElementById('addRowBtn').addEventListener('click', () => addRow());
 
+  // Worker install UI: add a small button/status next to the Create button
+    (function attachWorkerUi(){
+      try {
+        const createBtn = document.getElementById('createBtn');
+        if (!createBtn) return;
+        const container = document.createElement('div');
+        container.style.display = 'inline-block';
+        container.style.marginLeft = '8px';
+
+        const installBtn = document.createElement('button');
+        installBtn.id = 'installWorkerBtn';
+        installBtn.type = 'button';
+        installBtn.className = 'btn mini';
+        installBtn.textContent = 'Install worker';
+        installBtn.addEventListener('click', () => {
+          installBtn.disabled = true;
+          showSpinner(true);
+          rpc('ensureUserWorkerTrigger')
+            .then(() => {
+              localStorage.setItem('schoogle_worker_installed', '1');
+              updateWorkerStatus(true);
+              alert('Worker installed. Jobs will be processed in your account.');
+            })
+            .catch(err => {
+              console.error('ensureUserWorkerTrigger failed', err);
+              alert('Failed to install worker: ' + (err && err.message ? err.message : err));
+            })
+            .finally(() => { installBtn.disabled = false; showSpinner(false); });
+        });
+
+        const status = document.createElement('span');
+        status.id = 'workerStatus';
+        status.style.marginLeft = '8px';
+        status.style.fontSize = '0.9em';
+        status.style.color = '#444';
+
+        container.appendChild(installBtn);
+        container.appendChild(status);
+        createBtn.parentNode.insertBefore(container, createBtn.nextSibling);
+  // initialize
+  updateWorkerStatus();
+  // also create Jobs tab polling to keep job list up to date
+  startJobsPoller();
+      } catch (e) { console.warn('attachWorkerUi', e); }
+    })();
+
     // Preview
   document.getElementById('previewBtn').addEventListener('click', () => {
       const data = collectFormData();
@@ -405,8 +466,18 @@
           return copy;
         });
 
-        // Enqueue job on server
-        rpc('enqueueJob', payloadEvents, calendarId)
+        // Ensure per-user worker trigger is installed (may prompt for authorization),
+        // then enqueue job on server.
+        progress.textContent = `Installing per-user worker (may prompt for authorization)…`;
+        rpc('ensureUserWorkerTrigger')
+          .then(() => {
+            // Mark installed locally and update badge
+            try { localStorage.setItem('schoogle_worker_installed','1'); } catch (e) {}
+            try { updateWorkerStatus(true); } catch (e) {}
+            // Now enqueue the job
+            progress.textContent = `Enqueuing job for ${payloadEvents.length} events…`;
+            return rpc('enqueueJob', payloadEvents, calendarId);
+          })
           .then(jobId => {
             console.debug('Job enqueued', { jobId });
             progress.textContent = `Job queued: ${jobId}. Polling for status…`;
@@ -414,7 +485,8 @@
             pollJobStatus(jobId, calendarId);
           })
           .catch(err => {
-            console.error('enqueueJob failed', err);
+            console.error('enqueueJob/ensureWorker failed', err);
+            alert('Failed to install worker or enqueue job: ' + (err && err.message ? err.message : err));
             document.getElementById('createBtn').disabled = false;
           })
           .finally(() => showSpinner(false));
@@ -436,44 +508,87 @@
     });
 
     // Polling helper: polls getJobStatus until done and updates UI
+    // Global job poller state so polling continues even if user switches tabs
+    const JOB_POLL = { activeJobs: {}, interval: 5000, timerId: null };
+
     function pollJobStatus(jobId, calendarId) {
-      const progress = document.getElementById('createProgress');
-      let pollInterval = 5000; // 5s
-      let stopped = false;
-      function tick() {
-        if (stopped) return;
-        rpc('getJobStatus', jobId)
-          .then(status => {
-            if (!status) return;
-            const s = status.status || 'unknown';
-            const done = (status.progress && status.progress.done) || 0;
-            const total = (status.progress && status.progress.total) || 0;
-            progress.textContent = `Job ${jobId}: ${s} — ${done}/${total}`;
-            if (s === 'done') {
-              stopped = true;
-              document.getElementById('createBtn').disabled = false;
-              if (status.reportUrl) {
-                progress.textContent = `Done. Report: ${status.reportUrl}`;
-                switchTab('viewTab');
-                document.getElementById('viewCalendarSelect').value = calendarId;
-                loadViewEvents(calendarId);
-              } else {
-                progress.textContent = `Done.`;
+      // register job in global activeJobs map
+      JOB_POLL.activeJobs[jobId] = { calendarId: calendarId };
+      ensureJobPollerRunning();
+    }
+
+    function ensureJobPollerRunning() {
+      if (JOB_POLL.timerId) return; // already running
+      JOB_POLL.timerId = setInterval(() => {
+        const jobIds = Object.keys(JOB_POLL.activeJobs);
+        if (!jobIds.length) { clearInterval(JOB_POLL.timerId); JOB_POLL.timerId = null; return; }
+        jobIds.forEach(jid => {
+          rpc('getJobStatus', jid)
+            .then(status => {
+              // update create progress UI if present
+              const progress = document.getElementById('createProgress');
+              if (status && progress) {
+                const s = status.status || 'unknown';
+                const done = (status.progress && status.progress.done) || 0;
+                const total = (status.progress && status.progress.total) || 0;
+                const est = (status.progress && status.progress.estSeconds) || null;
+                let estText = est ? ` ETA ~ ${Math.round(est/60)}m ${est%60}s` : '';
+                progress.textContent = `Job ${jid}: ${s} — ${done}/${total}` + (estText ? ' —' + estText : '');
+                // disable/enable create button while any running
+                if (s === 'running') document.getElementById('createBtn').disabled = true;
+                if (s === 'done' || s === 'error' || s === 'notfound') {
+                  delete JOB_POLL.activeJobs[jid];
+                  document.getElementById('createBtn').disabled = false;
+                  if (s === 'done' && status.reportUrl) {
+                    progress.textContent = `Done. Report: ${status.reportUrl}`;
+                    switchTab('viewTab');
+                    document.getElementById('viewCalendarSelect').value = JOB_POLL.activeJobs[jid] ? JOB_POLL.activeJobs[jid].calendarId : '';
+                    loadViewEvents(JOB_POLL.activeJobs[jid] ? JOB_POLL.activeJobs[jid].calendarId : '');
+                  }
+                }
               }
-              return;
-            }
-            if (s === 'error' || s === 'notfound') {
-              stopped = true; document.getElementById('createBtn').disabled = false; return;
-            }
-            setTimeout(tick, pollInterval);
-          })
-          .catch(err => {
-            console.error('pollJobStatus failed', err);
-            stopped = true;
-            document.getElementById('createBtn').disabled = false;
+            })
+            .catch(err => { console.error('getJobStatus failed', err); delete JOB_POLL.activeJobs[jid]; document.getElementById('createBtn').disabled = false; });
+        });
+      }, JOB_POLL.interval);
+    }
+
+    // Jobs list poller (separate): keeps the Jobs tab list refreshed
+    let JOBS_LIST_TIMER = null;
+    function startJobsPoller() {
+      renderJobsList();
+      if (JOBS_LIST_TIMER) return;
+      JOBS_LIST_TIMER = setInterval(renderJobsList, 5000);
+    }
+
+    function renderJobsList() {
+  console.debug('renderJobsList tick', new Date().toISOString());
+  rpc('listUserJobs')
+        .then(list => {
+          const container = document.getElementById('jobsList');
+          if (!container) return;
+          container.innerHTML = '';
+          if (!list || !list.length) { container.textContent = 'No jobs found.'; return; }
+          const queued = list.filter(j => j.status === 'queued' || j.status === 'running');
+          const done = list.filter(j => j.status === 'done' || j.status === 'error');
+
+          const qh = document.createElement('h4'); qh.textContent = 'Queued / Running'; container.appendChild(qh);
+          queued.forEach(j => {
+            const d = document.createElement('div'); d.className = 'job-row';
+            d.textContent = `${j.jobId} — ${j.status} — ${j.done}/${j.total}` + (j.startedAt ? ` started:${new Date(j.startedAt).toLocaleString()}` : '');
+            if (j.reportUrl) { const a = document.createElement('a'); a.href = j.reportUrl; a.target = '_blank'; a.textContent = ' Report'; d.appendChild(a); }
+            container.appendChild(d);
           });
-      }
-      tick();
+
+          const dh = document.createElement('h4'); dh.textContent = 'Completed / Errors'; container.appendChild(dh);
+          done.forEach(j => {
+            const d = document.createElement('div'); d.className = 'job-row';
+            d.textContent = `${j.jobId} — ${j.status} — ${j.createdCount} created` + (j.lastUpdated ? ` updated:${new Date(j.lastUpdated).toLocaleString()}` : '');
+            if (j.reportUrl) { const a = document.createElement('a'); a.href = j.reportUrl; a.target = '_blank'; a.textContent = ' Report'; d.appendChild(a); }
+            container.appendChild(d);
+          });
+        })
+        .catch(err => { console.error('listUserJobs failed', err); });
     }
 
     // Back to form from preview
@@ -527,6 +642,8 @@
         console.error('getInitialData failed', err);
       })
       .finally(() => showSpinner(false));
+  // Start jobs poller unconditionally so Jobs tab stays up-to-date
+  try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
   }
 
   function renderViewEvents(events) {

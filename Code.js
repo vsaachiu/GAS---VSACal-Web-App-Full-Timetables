@@ -402,50 +402,179 @@ function setJobsSpreadsheetId(id) {
   return id;
 }
 
-function ensureWorkerTrigger() {
-  var triggers = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction && triggers[i].getHandlerFunction() === 'processJobs') return;
+// Ensure a per-user worker trigger exists (creates an installable trigger under the
+// calling user's account so jobs run with the user's credentials).
+function ensureUserWorkerTrigger() {
+  // Check existing project triggers and create an installable trigger for processUserJobs if missing.
+  var projTriggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < projTriggers.length; i++) {
+    try {
+      if (projTriggers[i].getHandlerFunction && projTriggers[i].getHandlerFunction() === 'processUserJobs') return;
+    } catch (e) { /* ignore */ }
   }
-  // create a minute-based trigger
-  ScriptApp.newTrigger('processJobs').timeBased().everyMinutes(1).create();
+  // create a minute-based trigger running as the current user
+  ScriptApp.newTrigger('processUserJobs').timeBased().everyMinutes(1).create();
 }
 
 function enqueueJob(events, calendarId) {
+  // Per-user enqueue: store job in the user's Drive under a SchoogleJobs folder and
+  // create a per-user trigger to process jobs. This ensures Calendar inserts run
+  // with the user's credentials (so events appear in their calendar).
   var jobId = 'job_' + Utilities.getUuid();
   var owner = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
-  var payload = { events: events || [], calendarId: calendarId || 'primary', owner: owner };
-  var file = DriveApp.createFile(jobId + '.json', JSON.stringify(payload));
-  var sh = getJobsSheet();
-  sh.appendRow([jobId, file.getId(), new Date(), 'queued', 0, payload.events.length || 0, '', '', '', owner]);
-  ensureWorkerTrigger();
+  var payload = { jobId: jobId, events: events || [], calendarId: calendarId || 'primary', owner: owner, createdAt: (new Date()).toISOString(), status: 'queued', done: 0, total: (events || []).length, reportUrl: null, errors: [], createdEvents: [], startedAt: null, lastUpdated: (new Date()).toISOString() };
+
+  // Ensure user's SchoogleJobs folder exists
+  var folder = getUserJobsFolder();
+  var file = folder.createFile(jobId + '.json', JSON.stringify(payload));
+
+  // Create per-user trigger if not present
+  try { ensureUserWorkerTrigger(); } catch (e) { /* non-fatal */ }
+
   return jobId;
 }
 
 function getJobStatus(jobId) {
-  var sh = getJobsSheet();
-  var vals = sh.getDataRange().getValues();
-  for (var i = 1; i < vals.length; i++) {
-    var row = vals[i];
-    if (row[0] === jobId) {
-      var status = row[3];
-      var done = Number(row[4]) || 0;
-      var total = Number(row[5]) || 0;
-      var reportUrl = row[6] || null;
-      var errorsFileId = row[7] || null;
-      var createdFileId = row[8] || null;
-      var errors = [];
-      if (errorsFileId) {
-        try { errors = JSON.parse(DriveApp.getFileById(errorsFileId).getBlob().getDataAsString()); } catch (e) { errors = []; }
+  // Per-user job status: look for job file in the user's SchoogleJobs folder
+  try {
+    var folder = getUserJobsFolder();
+    var files = folder.getFilesByName(jobId + '.json');
+    if (!files.hasNext()) return { jobId: jobId, status: 'notfound' };
+    var file = files.next();
+    var payload = JSON.parse(file.getBlob().getDataAsString());
+    var status = payload.status || 'unknown';
+    var done = Number(payload.done) || 0;
+    var total = Number(payload.total) || 0;
+    var reportUrl = payload.reportUrl || null;
+    var errors = payload.errors || [];
+    var createdCount = (payload.createdEvents && payload.createdEvents.length) || 0;
+    // Estimate remaining time (seconds) based on startedAt if available
+    var estSeconds = null;
+    try {
+      if (payload.startedAt && done > 0) {
+        var started = new Date(payload.startedAt).getTime();
+        var now = new Date().getTime();
+        var elapsed = Math.max(1, Math.round((now - started) / 1000));
+        var rate = elapsed / done; // seconds per item
+        estSeconds = Math.round(rate * Math.max(0, total - done));
       }
-      var createdCount = 0;
-      if (createdFileId) {
-        try { var arr = JSON.parse(DriveApp.getFileById(createdFileId).getBlob().getDataAsString()); createdCount = (arr && arr.length) || 0; } catch (e) { createdCount = 0; }
-      }
-      return { jobId: jobId, status: status, progress: { done: done, total: total, created: createdCount }, reportUrl: reportUrl, errors: errors };
-    }
+    } catch (e) { estSeconds = null; }
+    return { jobId: jobId, status: status, progress: { done: done, total: total, created: createdCount, estSeconds: estSeconds }, reportUrl: reportUrl, errors: errors };
+  } catch (e) {
+    return { jobId: jobId, status: 'error', error: e.toString() };
   }
-  return { jobId: jobId, status: 'notfound' };
+}
+
+// List all jobs for the current user (metadata only)
+function listUserJobs() {
+  var out = [];
+  try {
+    var folder = getUserJobsFolder();
+    var files = folder.getFiles();
+    while (files.hasNext()) {
+      var f = files.next();
+      if (!f.getName().match(/^job_/)) continue;
+      try {
+        var payload = JSON.parse(f.getBlob().getDataAsString());
+      } catch (e) { continue; }
+      out.push({ jobId: payload.jobId || f.getName().replace(/\.json$/, ''), status: payload.status || 'unknown', done: Number(payload.done) || 0, total: Number(payload.total) || 0, reportUrl: payload.reportUrl || null, createdCount: (payload.createdEvents && payload.createdEvents.length) || 0, errors: (payload.errors && payload.errors.length) || 0, startedAt: payload.startedAt || null, lastUpdated: payload.lastUpdated || null });
+    }
+  } catch (e) { /* ignore */ }
+  // sort by createdAt desc if present
+  out.sort(function(a,b){ return (b.lastUpdated || '') .localeCompare(a.lastUpdated || ''); });
+  return out;
+}
+
+// Helper: get or create a SchoogleJobs folder in the current user's My Drive
+function getUserJobsFolder() {
+  var FOLDER_NAME = 'SchoogleJobs';
+  var folders = DriveApp.getFoldersByName(FOLDER_NAME);
+  if (folders.hasNext()) return folders.next();
+  return DriveApp.createFolder(FOLDER_NAME);
+}
+
+// Worker to be installed per-user: scans the user's SchoogleJobs folder and processes queued jobs.
+function processUserJobs() {
+  var lock = LockService.getUserLock();
+  if (!lock.tryLock(30000)) return; // already running for this user
+  try {
+    var folder = getUserJobsFolder();
+    var files = folder.getFiles();
+    var tz = Session.getScriptTimeZone() || 'Asia/Hong_Kong';
+    var CHUNK = 5;
+    while (files.hasNext()) {
+      var f = files.next();
+      if (!f.getName().match(/^job_/)) continue;
+      try {
+        var payload = JSON.parse(f.getBlob().getDataAsString());
+      } catch (e) { continue; }
+      if (!payload || payload.status !== 'queued' && payload.status !== 'running') continue;
+  var events = payload.events || [];
+      var total = events.length;
+  payload.status = 'running';
+  if (!payload.done) payload.done = 0;
+  if (!payload.startedAt) payload.startedAt = (new Date()).toISOString();
+      // process a chunk
+      for (var idx = payload.done; idx < Math.min(payload.done + CHUNK, total); idx++) {
+        var ev = events[idx];
+        try {
+          var resource = {
+            summary: ev.title,
+            location: ev.location || '',
+            start: { dateTime: formatRFC3339(new Date(ev.startDateTime), tz), timeZone: tz },
+            end: { dateTime: formatRFC3339(new Date(ev.endDateTime), tz), timeZone: tz },
+            description: 'SchoogleJob:' + (payload.jobId || '') + ':' + idx,
+            extendedProperties: { private: { Schoogle: 'true', SchoogleEventID: ev.schoogleEventId } }
+          };
+          var created = Calendar.Events.insert(resource, payload.calendarId || 'primary');
+          payload.createdEvents = payload.createdEvents || [];
+          payload.createdEvents.push({ Title: ev.title, Start: new Date(ev.startDateTime), End: new Date(ev.endDateTime), Location: ev.location || '', GoogleEventID: created.id, CalID: payload.calendarId || 'primary', Day: ev.day || '', Period: ev.periodId || '', DayType: ev.dayType || '', SchoogleEventID: ev.schoogleEventId });
+        } catch (err) {
+          payload.errors = payload.errors || [];
+          payload.errors.push({ index: idx, message: err && err.message ? err.message : (err + '') });
+        }
+  Utilities.sleep(1000);
+  payload.done = idx + 1;
+  payload.lastUpdated = (new Date()).toISOString();
+  // persist updated payload back to file
+  try { f.setContent(JSON.stringify(payload)); } catch (e) { /* ignore */ }
+      }
+
+      // finalize if complete
+      if (payload.done >= total) {
+        try {
+          var reportUrl = createReportSpreadsheet(payload.createdEvents || []);
+          payload.reportUrl = reportUrl;
+          payload.status = 'done';
+          f.setContent(JSON.stringify(payload));
+          // notify user
+          try {
+            var ownerEmail = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
+            if (ownerEmail) {
+              var subject = 'Schoogle: Job ' + (payload.jobId || '') + ' completed';
+              var body = 'Your Schoogle job has completed.\n\nCreated events: ' + ((payload.createdEvents && payload.createdEvents.length) || 0) + '\nReport: ' + (reportUrl || '') + '\n\nIf you did not expect this, contact the administrator.';
+              MailApp.sendEmail(ownerEmail, subject, body);
+            }
+          } catch (mailErr) { /* ignore */ }
+        } catch (finalErr) {
+          payload.status = 'error';
+          payload.errors = payload.errors || [];
+          payload.errors.push({ finalization: finalErr.toString() });
+          try { f.setContent(JSON.stringify(payload)); } catch (e) { /* ignore */ }
+          try {
+            var ownerEmail2 = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
+            if (ownerEmail2) {
+              var subject2 = 'Schoogle: Job ' + (payload.jobId || '') + ' failed';
+              var body2 = 'Your Schoogle job encountered an error during finalization.\n\nError: ' + finalErr.toString() + '\nPlease check the job file in your Drive.';
+              MailApp.sendEmail(ownerEmail2, subject2, body2);
+            }
+          } catch (mailErr2) { /* ignore */ }
+        }
+      }
+    }
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
 }
 
 // Worker: run under a time-based trigger. Processes small chunks and persists progress.
