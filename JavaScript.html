@@ -103,6 +103,83 @@
     document.getElementById('formRows').appendChild(row);
   }
 
+  // Read structured data from a form row DOM element
+  function getRowData(row) {
+    return {
+      day: (row.querySelector('.day-select')||{}).value || '',
+      periodId: (row.querySelector('.period-select')||{}).value || '',
+      title: (row.querySelector('.title-input')||{}).value || '',
+      location: (row.querySelector('.location-input')||{}).value || ''
+    };
+  }
+
+  // Set values into an existing form row element
+  function setRowData(row, data) {
+    try {
+      if (data.day) row.querySelector('.day-select').value = data.day; else row.querySelector('.day-select').value = '';
+      if (data.periodId) row.querySelector('.period-select').value = data.periodId; else row.querySelector('.period-select').value = '';
+      row.querySelector('.title-input').value = data.title || '';
+      row.querySelector('.location-input').value = data.location || '';
+    } catch (e) { /* ignore */ }
+  }
+
+  // Sort form rows by field (day, periodId, title, location). Toggles asc/desc.
+  state.sortField = null; state.sortDir = 1; // 1=asc, -1=desc
+  // Helper: attempt to parse numeric part for natural sorting (e.g. "Day 10" -> 10)
+  function parseSortKey(field, raw) {
+    const s = (raw || '').toString().trim();
+    // For day and periodId, try to extract the first number
+    if (field === 'day' || field === 'periodId') {
+      const m = s.match(/(\d+)/);
+      if (m) return { num: parseInt(m[1], 10), str: s.toLowerCase() };
+    }
+    return { str: s.toLowerCase() };
+  }
+  function sortFormRows(field) {
+    const container = document.getElementById('formRows');
+    const rows = Array.from(container.querySelectorAll('.form-row')).filter(r => !r.dataset.template && !r.classList.contains('header'));
+    if (!rows.length) return;
+    if (state.sortField === field) state.sortDir = -state.sortDir; else { state.sortField = field; state.sortDir = 1; }
+    const mapped = rows.map(r => ({ dom: r, data: getRowData(r) }));
+    mapped.sort((a,b) => {
+      const ka = parseSortKey(field, a.data[field]);
+      const kb = parseSortKey(field, b.data[field]);
+      // If both have numeric parts, compare numerically
+      if (ka.num != null && kb.num != null) {
+        if (ka.num < kb.num) return -1 * state.sortDir;
+        if (ka.num > kb.num) return 1 * state.sortDir;
+        // fallback to string compare if numbers equal
+        if (ka.str < kb.str) return -1 * state.sortDir;
+        if (ka.str > kb.str) return 1 * state.sortDir;
+        return 0;
+      }
+      // If only one has number, prefer the numeric one first
+      if (ka.num != null && kb.num == null) return -1 * state.sortDir;
+      if (ka.num == null && kb.num != null) return 1 * state.sortDir;
+      // Default string compare
+      const va = (ka.str || '').toString();
+      const vb = (kb.str || '').toString();
+      if (va < vb) return -1 * state.sortDir;
+      if (va > vb) return 1 * state.sortDir;
+      return 0;
+    });
+    // Re-append in new order
+    mapped.forEach(m => container.appendChild(m.dom));
+    // Update header indicators
+    updateHeaderSortIndicators();
+  }
+
+  function updateHeaderSortIndicators() {
+    document.querySelectorAll('.form-row.header label').forEach(lbl => {
+      // remove existing indicator
+      let sp = lbl.querySelector('.sort-ind');
+      if (!sp) { sp = document.createElement('span'); sp.className = 'sort-ind'; lbl.appendChild(sp); }
+      sp.textContent = '';
+      const key = lbl.getAttribute('data-sort-key');
+      if (key && state.sortField === key) sp.textContent = state.sortDir === 1 ? '▲' : '▼';
+    });
+  }
+
   function collectFormData() {
     const rows = Array.from(document.querySelectorAll('#formRows .form-row'))
       .filter(r => !r.dataset.template && !r.classList.contains('header'));
@@ -139,6 +216,21 @@
       const d = new Date(dt);
       return d.toLocaleString();
     } catch(e) { return dt; }
+  }
+
+  function updateWorkerStatus(installed) {
+    const el = document.getElementById('workerStatus');
+    if (!el) return;
+    try {
+      if (typeof installed === 'undefined') installed = !!localStorage.getItem('schoogle_worker_installed');
+    } catch (e) { installed = false; }
+    if (installed) {
+      el.textContent = 'Worker installed';
+      el.style.color = 'green';
+    } else {
+      el.textContent = 'Worker not installed';
+      el.style.color = '#c33';
+    }
   }
 
   function renderPreview() {
@@ -227,12 +319,20 @@
         // Prevent clicks from bubbling to the <details> which toggles it
         delBtn.addEventListener('pointerdown', e => { if (e && e.stopPropagation) e.stopPropagation(); });
         delBtn.addEventListener('click', (evclick) => {
-          if (evclick && evclick.stopPropagation) evclick.stopPropagation();
-          if (evclick && evclick.preventDefault) evclick.preventDefault();
-          // remove from state and re-render
-          state.previewEvents = state.previewEvents.filter(x => x !== ev);
-          renderPreview();
-          updatePreviewMeta();
+          try {
+            if (evclick && evclick.stopPropagation) evclick.stopPropagation();
+            if (evclick && evclick.preventDefault) evclick.preventDefault();
+            // disable the button immediately to prevent double-clicks
+            delBtn.disabled = true;
+            delBtn.classList.add('disabled');
+            // remove from state and re-render
+            state.previewEvents = state.previewEvents.filter(x => x !== ev);
+            renderPreview();
+            updatePreviewMeta();
+          } catch (e) {
+            console.error('preview delete failed', e);
+            try { delBtn.disabled = false; delBtn.classList.remove('disabled'); } catch (e2) {}
+          }
         });
 
   li.appendChild(timeWrapper);
@@ -289,6 +389,59 @@
 
     // Add row
     document.getElementById('addRowBtn').addEventListener('click', () => addRow());
+
+    // Make header labels clickable for sorting form rows
+    document.querySelectorAll('.form-row.header label').forEach(lbl => {
+      lbl.addEventListener('click', () => {
+        const key = lbl.getAttribute('data-sort-key');
+        if (!key) return;
+        sortFormRows(key);
+      });
+    });
+
+  // Worker install UI: add a small button/status next to the Create button
+    (function attachWorkerUi(){
+      try {
+        const createBtn = document.getElementById('createBtn');
+        if (!createBtn) return;
+        const container = document.createElement('div');
+        container.style.display = 'inline-block';
+        container.style.marginLeft = '8px';
+
+        const installBtn = document.createElement('button');
+        installBtn.id = 'installWorkerBtn';
+        installBtn.type = 'button';
+        installBtn.className = 'btn mini';
+        installBtn.textContent = 'Install worker';
+        installBtn.addEventListener('click', () => {
+          installBtn.disabled = true;
+          showSpinner(true);
+          rpc('ensureUserWorkerTrigger')
+            .then(() => {
+              localStorage.setItem('schoogle_worker_installed', '1');
+              updateWorkerStatus(true);
+              alert('Worker installed. Jobs will be processed in your account.');
+            })
+            .catch(err => {
+              console.error('ensureUserWorkerTrigger failed', err);
+              alert('Failed to install worker: ' + (err && err.message ? err.message : err));
+            })
+            .finally(() => { installBtn.disabled = false; showSpinner(false); });
+        });
+
+        const status = document.createElement('span');
+        status.id = 'workerStatus';
+        status.style.marginLeft = '8px';
+        status.style.fontSize = '0.9em';
+        status.style.color = '#444';
+
+        container.appendChild(installBtn);
+        container.appendChild(status);
+        createBtn.parentNode.insertBefore(container, createBtn.nextSibling);
+  // initialize
+  updateWorkerStatus();
+      } catch (e) { console.warn('attachWorkerUi', e); }
+    })();
 
     // Preview
   document.getElementById('previewBtn').addEventListener('click', () => {
@@ -380,6 +533,47 @@
         .finally(() => showSpinner(false));
     });
 
+    // Load other teacher timetable UI
+    try {
+      const showBtn = document.getElementById('showLoadOtherBtn');
+      const wrap = document.getElementById('otherLoadWrap');
+      const select = document.getElementById('otherTeacherSelect');
+      const loadBtn = document.getElementById('loadOtherBtn');
+      if (showBtn && wrap && select && loadBtn) {
+        showBtn.addEventListener('click', () => {
+          // toggle visibility
+          wrap.style.display = (wrap.style.display === 'none' || !wrap.style.display) ? '' : 'none';
+          if (wrap.style.display !== 'none' && !select.options.length) {
+            showSpinner(true);
+            rpc('getTeachers').then(list => {
+              // populate select alphabetically (server already sorts)
+              select.innerHTML = '';
+              const opt = document.createElement('option'); opt.value = ''; opt.textContent = '-- Select teacher --'; select.appendChild(opt);
+              (list || []).forEach(t => { const o = document.createElement('option'); o.value = t.email; o.textContent = t.name || t.email; select.appendChild(o); });
+            }).catch(err => { console.error('getTeachers failed', err); alert('Failed to load teachers.'); }).finally(()=>showSpinner(false));
+          }
+        });
+
+        loadBtn.addEventListener('click', () => {
+          const email = (select.value || '').toString().trim();
+          if (!email) { alert('Select a teacher to load.'); return; }
+          if (!confirm('Replace current prefilled rows with timetable for ' + (select.options[select.selectedIndex].text || email) + '?')) return;
+          showSpinner(true);
+          rpc('getTeacherTimetable', email)
+            .then(rows => {
+              // clear existing non-template rows
+              const container = document.getElementById('formRows');
+              const existing = Array.from(container.querySelectorAll('.form-row')).filter(r => !r.dataset.template && !r.classList.contains('header'));
+              existing.forEach(r => r.remove());
+              // Prefill rows
+              (rows || []).forEach(r => addRow(r));
+            })
+            .catch(err => { console.error('getTeacherTimetable failed', err); alert('Failed to load timetable.'); })
+            .finally(() => showSpinner(false));
+        });
+      }
+    } catch (e) { console.warn('other teacher UI wiring failed', e); }
+
     // Create
     document.getElementById('createBtn').addEventListener('click', () => {
       if (!state.previewEvents.length) { alert('No events to create.'); return; }
@@ -405,16 +599,29 @@
           return copy;
         });
 
-        // Enqueue job on server
-        rpc('enqueueJob', payloadEvents, calendarId)
+        // Ensure per-user worker trigger is installed (may prompt for authorization),
+        // then enqueue job on server.
+        progress.textContent = `Installing per-user worker (may prompt for authorization)…`;
+        rpc('ensureUserWorkerTrigger')
+          .then(() => {
+            // Mark installed locally and update badge
+            try { localStorage.setItem('schoogle_worker_installed','1'); } catch (e) {}
+            try { updateWorkerStatus(true); } catch (e) {}
+            // Now enqueue the job
+            progress.textContent = `Enqueuing job for ${payloadEvents.length} events…`;
+            return rpc('enqueueJob', payloadEvents, calendarId);
+          })
           .then(jobId => {
             console.debug('Job enqueued', { jobId });
             progress.textContent = `Job queued: ${jobId}. Polling for status…`;
             // start polling
             pollJobStatus(jobId, calendarId);
+            // Ensure jobs list poller starts so Jobs tab shows the queued job
+            try { ensureJobsPollerStarted(); } catch (e) { console.warn('ensureJobsPollerStarted failed', e); }
           })
           .catch(err => {
-            console.error('enqueueJob failed', err);
+            console.error('enqueueJob/ensureWorker failed', err);
+            alert('Failed to install worker or enqueue job: ' + (err && err.message ? err.message : err));
             document.getElementById('createBtn').disabled = false;
           })
           .finally(() => showSpinner(false));
@@ -436,44 +643,129 @@
     });
 
     // Polling helper: polls getJobStatus until done and updates UI
+    // Global job poller state so polling continues even if user switches tabs
+    const JOB_POLL = { activeJobs: {}, interval: 5000, timerId: null };
+
     function pollJobStatus(jobId, calendarId) {
-      const progress = document.getElementById('createProgress');
-      let pollInterval = 5000; // 5s
-      let stopped = false;
-      function tick() {
-        if (stopped) return;
-        rpc('getJobStatus', jobId)
-          .then(status => {
-            if (!status) return;
-            const s = status.status || 'unknown';
-            const done = (status.progress && status.progress.done) || 0;
-            const total = (status.progress && status.progress.total) || 0;
-            progress.textContent = `Job ${jobId}: ${s} — ${done}/${total}`;
-            if (s === 'done') {
-              stopped = true;
-              document.getElementById('createBtn').disabled = false;
-              if (status.reportUrl) {
-                progress.textContent = `Done. Report: ${status.reportUrl}`;
-                switchTab('viewTab');
-                document.getElementById('viewCalendarSelect').value = calendarId;
-                loadViewEvents(calendarId);
-              } else {
-                progress.textContent = `Done.`;
+      // register job in global activeJobs map
+      JOB_POLL.activeJobs[jobId] = { calendarId: calendarId };
+      ensureJobPollerRunning();
+    }
+
+    function ensureJobPollerRunning() {
+      if (JOB_POLL.timerId) return; // already running
+      JOB_POLL.timerId = setInterval(() => {
+        const jobIds = Object.keys(JOB_POLL.activeJobs);
+        if (!jobIds.length) { clearInterval(JOB_POLL.timerId); JOB_POLL.timerId = null; return; }
+        jobIds.forEach(jid => {
+          rpc('getJobStatus', jid)
+            .then(status => {
+              // update create progress UI if present
+              const progress = document.getElementById('createProgress');
+              if (status && progress) {
+                const s = status.status || 'unknown';
+                const done = (status.progress && status.progress.done) || 0;
+                const total = (status.progress && status.progress.total) || 0;
+                const est = (status.progress && status.progress.estSeconds) || null;
+                let estText = est ? ` ETA ~ ${Math.round(est/60)}m ${est%60}s` : '';
+                progress.textContent = `Job ${jid}: ${s} — ${done}/${total}` + (estText ? ' —' + estText : '');
+                // disable/enable create button while any running
+                if (s === 'running') document.getElementById('createBtn').disabled = true;
+                if (s === 'done' || s === 'error' || s === 'notfound') {
+                  delete JOB_POLL.activeJobs[jid];
+                  document.getElementById('createBtn').disabled = false;
+                  if (s === 'done' && status.reportUrl) {
+                    progress.textContent = `Done. Report: ${status.reportUrl}`;
+                    // Switch to View tab
+                    switchTab('viewTab');
+                    document.getElementById('viewCalendarSelect').value = JOB_POLL.activeJobs[jid] ? JOB_POLL.activeJobs[jid].calendarId : '';
+                    loadViewEvents(JOB_POLL.activeJobs[jid] ? JOB_POLL.activeJobs[jid].calendarId : '');
+                    // Clear Preview state and UI so user cannot accidentally re-run the same preview
+                    try {
+                      state.previewEvents = [];
+                      const previewContainer = document.getElementById('previewContainer');
+                      if (previewContainer) previewContainer.innerHTML = '';
+                      // re-enable create controls for adding new items
+                      document.getElementById('createBtn').disabled = false;
+                      // reset any preview input fields if present
+                      try { document.getElementById('fromDate').value = ''; } catch (e) {}
+                      try { document.getElementById('toDate').value = ''; } catch (e) {}
+                    } catch (e) { /* ignore UI errors */ }
+                  }
+                }
+                // Show open-spreadsheet button if spreadsheetUrl available
+                try {
+                  var linkContainer = document.getElementById('createProgressLink');
+                  if (!linkContainer) {
+                    linkContainer = document.createElement('span');
+                    linkContainer.id = 'createProgressLink';
+                    progress.parentNode && progress.parentNode.appendChild(linkContainer);
+                  }
+                  if (status && status.spreadsheetUrl) {
+                    linkContainer.innerHTML = '';
+                    var a = document.createElement('a');
+                    a.href = status.spreadsheetUrl;
+                    a.target = '_blank';
+                    a.textContent = 'Open spreadsheet';
+                    a.style.marginLeft = '8px';
+                    linkContainer.appendChild(a);
+                  } else if (linkContainer) {
+                    linkContainer.innerHTML = '';
+                  }
+                } catch (e) { /* ignore UI errors */ }
               }
-              return;
-            }
-            if (s === 'error' || s === 'notfound') {
-              stopped = true; document.getElementById('createBtn').disabled = false; return;
-            }
-            setTimeout(tick, pollInterval);
-          })
-          .catch(err => {
-            console.error('pollJobStatus failed', err);
-            stopped = true;
-            document.getElementById('createBtn').disabled = false;
+            })
+            .catch(err => { console.error('getJobStatus failed', err); delete JOB_POLL.activeJobs[jid]; document.getElementById('createBtn').disabled = false; });
+        });
+      }, JOB_POLL.interval);
+    }
+
+    // Jobs list poller (separate): keeps the Jobs tab list refreshed only when there are jobs
+    let JOBS_LIST_TIMER = null;
+    function ensureJobsPollerStarted() {
+      if (JOBS_LIST_TIMER) return; // already running
+      // Fetch once and start interval only if there are jobs
+      renderJobsList().then(list => {
+        if (list && list.length) {
+          JOBS_LIST_TIMER = setInterval(renderJobsList, 5000);
+        }
+      }).catch(() => {});
+    }
+
+    function stopJobsPoller() {
+      if (JOBS_LIST_TIMER) { clearInterval(JOBS_LIST_TIMER); JOBS_LIST_TIMER = null; }
+    }
+
+    // Render jobs list and return the fetched list (promise) so callers can decide whether to poll
+    function renderJobsList() {
+      console.debug('renderJobsList tick', new Date().toISOString());
+      return rpc('listUserJobs')
+        .then(list => {
+          const container = document.getElementById('jobsList');
+          if (!container) return list || [];
+          container.innerHTML = '';
+          if (!list || !list.length) { container.textContent = 'No jobs found.'; stopJobsPoller(); return list || []; }
+          const queued = list.filter(j => j.status === 'queued' || j.status === 'running');
+          const done = list.filter(j => j.status === 'done' || j.status === 'error');
+
+          const qh = document.createElement('h4'); qh.textContent = 'Queued / Running'; container.appendChild(qh);
+          queued.forEach(j => {
+            const d = document.createElement('div'); d.className = 'job-row';
+            d.textContent = `${j.jobId} — ${j.status} — ${j.done}/${j.total}` + (j.startedAt ? ` started:${new Date(j.startedAt).toLocaleString()}` : '');
+            if (j.reportUrl) { const a = document.createElement('a'); a.href = j.reportUrl; a.target = '_blank'; a.textContent = ' Report'; d.appendChild(a); }
+            container.appendChild(d);
           });
-      }
-      tick();
+
+          const dh = document.createElement('h4'); dh.textContent = 'Completed / Errors'; container.appendChild(dh);
+          done.forEach(j => {
+            const d = document.createElement('div'); d.className = 'job-row';
+            d.textContent = `${j.jobId} — ${j.status} — ${j.createdCount} created` + (j.lastUpdated ? ` updated:${new Date(j.lastUpdated).toLocaleString()}` : '');
+            if (j.reportUrl) { const a = document.createElement('a'); a.href = j.reportUrl; a.target = '_blank'; a.textContent = ' Report'; d.appendChild(a); }
+            container.appendChild(d);
+          });
+          return list || [];
+        })
+        .catch(err => { console.error('listUserJobs failed', err); return []; });
     }
 
     // Back to form from preview
@@ -527,6 +819,11 @@
         console.error('getInitialData failed', err);
       })
       .finally(() => showSpinner(false));
+  // Wire manual refresh button for Jobs tab (don't poll constantly if no jobs)
+  try {
+    const rb = document.getElementById('refreshJobsBtn');
+    if (rb) rb.addEventListener('click', () => { showSpinner(true); renderJobsList().finally(()=>showSpinner(false)); });
+  } catch (e) { console.warn('refreshJobsBtn wiring failed', e); }
   }
 
   function renderViewEvents(events) {
@@ -539,6 +836,63 @@
       const details = document.createElement('details');
       const summary = document.createElement('summary');
       summary.textContent = `${title} (${groups[title].length})`;
+      // Add a delete-all button at the group level
+      const deleteAllBtn = document.createElement('button');
+      deleteAllBtn.className = 'btn danger mini';
+      deleteAllBtn.style.marginLeft = '8px';
+      deleteAllBtn.textContent = 'Delete all';
+      deleteAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const calId = document.getElementById('viewCalendarSelect').value;
+        showSpinner(true);
+        // Fetch Schoogle events for the calendar and filter client-side by title
+        rpc('getEventsFromCalendar', calId)
+          .then(list => {
+            showSpinner(false);
+            if (!list || !list.length) { alert('No Schoogle events found in this calendar.'); return; }
+            const matches = (list || []).filter(ev => {
+              try { return (ev.title || '').toString().trim().toLowerCase() === (title || '').toString().trim().toLowerCase(); } catch (e) { return false; }
+            });
+            if (!matches.length) { alert('No matching events found for "' + title + '".'); return; }
+            // Build modal using site-styled classes
+            const overlay = document.createElement('div');
+            overlay.id = 'schoogle-delete-modal';
+            overlay.className = 'schoogle-modal-overlay';
+            const box = document.createElement('div');
+            box.className = 'schoogle-modal-box';
+            const h = document.createElement('h3'); h.textContent = 'Confirm delete events for "' + title + '"'; box.appendChild(h);
+            const desc = document.createElement('div'); desc.textContent = 'Select events to delete:'; box.appendChild(desc);
+            const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+            matches.forEach(ev => {
+              const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+              const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.eid = ev.id;
+              const txt = document.createElement('span'); txt.textContent = `${ev.title} — ${fmt(ev.start)} → ${fmt(ev.end)} ${ev.location ? '(' + ev.location + ')' : ''}`;
+              li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+            });
+            box.appendChild(ul);
+            const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+            const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+            btnCancel.addEventListener('click', () => overlay.remove());
+            const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn danger'; btnConfirm.textContent = 'Delete selected';
+            btnConfirm.addEventListener('click', () => {
+              const selected = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.eid);
+              if (!selected.length) { alert('No events selected.'); return; }
+              showSpinner(true);
+              rpc('deleteEventsByIds', calId, selected)
+                .then(res => {
+                  overlay.remove();
+                  alert('Deleted ' + (res.deleted || 0) + ' events.');
+                  loadViewEvents(calId);
+                })
+                .catch(err => { console.error('deleteEventsByIds failed', err); alert('Delete failed: ' + (err && err.message ? err.message : err)); })
+                .finally(() => showSpinner(false));
+            });
+            btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+            overlay.appendChild(box); document.body.appendChild(overlay);
+          })
+          .catch(err => { showSpinner(false); console.error('getEventsFromCalendar failed', err); alert('Failed to list events: ' + (err && err.message ? err.message : err)); });
+      });
+      summary.appendChild(deleteAllBtn);
       details.appendChild(summary);
 
       const ul = document.createElement('ul');

@@ -24,6 +24,13 @@ header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
 .tab-content { display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
 .tab-content.active { display: block; }
 
+/* Small instructional text shown at the top of each section */
+.section-instructions { color: var(--muted); font-size: 13px; margin-bottom: 12px; line-height: 1.4; }
+
+/* Make the header labels look clickable for sorting */
+.form-row.header label { cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 6px; }
+.form-row.header label .sort-ind { font-size: 12px; color: var(--muted); }
+
 .form-rows { display: grid; gap: 8px; }
 .form-row { display: grid; grid-template-columns: 140px 1fr 1.4fr 1fr auto; gap: 8px; }
 .form-row.header { color: var(--muted); font-size: 12px; }
@@ -54,6 +61,29 @@ header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
 }
 .event-time-edit .time-sep { color: var(--muted); padding: 0 8px; }
 
+/* Preview-specific delete button: use a ghost/danger style so it matches the site
+   (filled red buttons are reserved for destructive confirmations elsewhere). */
+.event-item .btn.danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: rgba(239,68,68,0.12);
+}
+.event-item .btn.danger:hover { background: rgba(239,68,68,0.06); }
+
+/* Disabled button appearance used across the UI */
+.btn[disabled], .btn.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+  filter: grayscale(20%);
+}
+
+.event-item .btn.danger.disabled {
+  background: transparent;
+  color: rgba(239,68,68,0.6);
+  border-color: rgba(239,68,68,0.06);
+}
+
 .calendar-picker { margin: 10px 0; display: flex; gap: 8px; align-items: center; }
 .calendar-picker select, .calendar-picker input { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: #0b1220; color: var(--text); }
 /* Limit calendar select width so it doesn't stretch the layout */
@@ -64,4 +94,16 @@ header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
 .spinner-text { color: var(--muted); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Modal styles matching site dark theme */
+.schoogle-modal-overlay {
+  position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+  background: rgba(2,6,23,0.6); display: flex; align-items: flex-start; justify-content: center; padding-top: 48px; z-index: 9999;
+}
+.schoogle-modal-box {
+  background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 16px; max-width: 720px; width: calc(100% - 48px); max-height: 70vh; overflow: auto;
+}
+.schoogle-modal-box h3 { margin-top: 0; }
+.schoogle-modal-box .btn { margin-left: 8px; }
+
 </style>
