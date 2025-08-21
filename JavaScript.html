@@ -248,19 +248,27 @@
       }
     } catch (e) { /* ignore UI errors */ }
     
-    // If a job just finished, switch to View tab and reset preview state
+    // If a job just finished, reset preview state
     const justDone = JOBS_POLL_LAST.find(j => j.status === 'done' && !j._uiDone);
     if (justDone) {
       justDone._uiDone = true;
-      switchTab('viewTab');
+      // Removed automatic tab switch to View tab
       // Optionally reload events for the relevant calendar
       try {
-        state.previewEvents = [];
-        const previewContainer = document.getElementById('previewContainer');
-        if (previewContainer) previewContainer.innerHTML = '';
+        // Only clear preview if we're actually on the preview section (don't interfere with active work)
+        const previewSection = document.getElementById('previewSection');
+        const formSection = document.getElementById('formSection');
+        if (previewSection && previewSection.style.display !== 'none') {
+          // User is viewing preview, safe to clear
+          console.log('Clearing preview events due to job completion (user on preview tab)');
+          state.previewEvents = [];
+          const previewContainer = document.getElementById('previewContainer');
+          if (previewContainer) previewContainer.innerHTML = '';
+        } else {
+          console.log('NOT clearing preview events - user not on preview tab');
+        }
         try { document.getElementById('createBtn').disabled = false; } catch (e) {}
-        try { document.getElementById('fromDate').value = ''; } catch (e) {}
-        try { document.getElementById('toDate').value = ''; } catch (e) {}
+        // Removed date field clearing - should not affect Add tab when jobs complete
       } catch (e) { /* ignore UI errors */ }
     }
   }
@@ -503,8 +511,19 @@
       };
       out.push(item);
     }
-  const filtered = out.filter(x => x.day && x.periodId && x.title);
-  return filtered;
+    
+    // Debug logging to help identify missing data
+    const filtered = out.filter(x => x.day && x.periodId && x.title);
+    const rejected = out.filter(x => !x.day || !x.periodId || !x.title);
+    
+    if (rejected.length > 0) {
+      console.warn('collectFormData: Rejected rows with missing data:', rejected);
+      console.log('Available periods:', state.periods.map(p => ({ id: p.id, text: p.text })));
+    }
+    
+    console.debug('collectFormData:', { totalRows: out.length, validRows: filtered.length, rejectedRows: rejected.length });
+    
+    return filtered;
   }
 
   function groupByTitle(events) {
@@ -825,6 +844,12 @@
 
           console.log('Generated Events (normalized):', { count: normalized.length, sample: normalized.slice(0,5), type: Object.prototype.toString.call(evts) });
           state.previewEvents = normalized || [];
+          
+          // Save to localStorage as backup in case job polling clears it
+          try {
+            localStorage.setItem('schoogle_preview_events', JSON.stringify(state.previewEvents));
+          } catch (e) { console.warn('Failed to save preview events to localStorage:', e); }
+          
           console.debug('generatePreviewEvents -> success', { count: state.previewEvents.length, sample: state.previewEvents.slice(0,5) });
           document.getElementById('formSection').style.display = 'none';
           document.getElementById('previewSection').style.display = '';
@@ -870,12 +895,24 @@
           showSpinner(true);
           rpc('getTeacherTimetable', email)
             .then(rows => {
+              console.log('getTeacherTimetable response:', rows);
+              console.log('Available periods for comparison:', state.periods);
+              
               // clear existing non-template rows
               const container = document.getElementById('formRows');
               const existing = Array.from(container.querySelectorAll('.form-row')).filter(r => !r.dataset.template && !r.classList.contains('header'));
               existing.forEach(r => r.remove());
               // Prefill rows
-              (rows || []).forEach(r => addRow(r));
+              (rows || []).forEach((r, index) => {
+                console.log(`Adding row ${index}:`, r);
+                addRow(r);
+              });
+              
+              // Verify what was actually added to the form
+              setTimeout(() => {
+                const formData = collectFormData();
+                console.log('Form data after loading teacher timetable:', formData);
+              }, 100);
             })
             .catch(err => { console.error('getTeacherTimetable failed', err); alert('Failed to load timetable.'); })
             .finally(() => showSpinner(false));
@@ -885,7 +922,23 @@
 
     // Create
     document.getElementById('createBtn').addEventListener('click', () => {
-      if (!state.previewEvents.length) { alert('No events to create.'); return; }
+      console.log('Create button clicked. Preview events:', state.previewEvents.length, state.previewEvents);
+      
+      // Try to restore from localStorage if preview events were cleared
+      if (!state.previewEvents.length) {
+        try {
+          const saved = localStorage.getItem('schoogle_preview_events');
+          if (saved) {
+            state.previewEvents = JSON.parse(saved);
+            console.log('Restored preview events from localStorage:', state.previewEvents.length);
+          }
+        } catch (e) { console.warn('Failed to restore from localStorage:', e); }
+      }
+      
+      if (!state.previewEvents.length) { 
+        alert('No events to create. Check that you have previewed events first.'); 
+        return; 
+      }
       const calSel = document.getElementById('calendarSelect');
       let calendarId = calSel.value;
       const newNameEl = document.getElementById('newCalendarName');
@@ -923,6 +976,10 @@
           .then(jobId => {
             console.debug('Job enqueued', { jobId });
             progress.textContent = 'Job queued: ' + jobId + '. Check Jobs tab for progress…';
+            
+            // Clear localStorage backup since job was successfully created
+            try { localStorage.removeItem('schoogle_preview_events'); } catch (e) {}
+            
             // Ensure jobs list poller starts so Jobs tab shows the queued job
             try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
             // Fire-and-forget kickoff so processing starts ASAP, even if the timed trigger hasn't fired yet
@@ -1008,24 +1065,30 @@
           linkContainer.innerHTML = '';
         }
       } catch (e) { /* ignore UI errors */ }
-      // If a job just finished, switch to View tab and reset preview state
+      // If a job just finished, reset preview state
       const justDone = JOBS_POLL_LAST.find(j => j.status === 'done' && !j._uiDone);
       if (justDone) {
         justDone._uiDone = true;
-        switchTab('viewTab');
+        // Removed automatic tab switch to View tab
         // Optionally reload events for the relevant calendar
         if (justDone.calendarId) {
           document.getElementById('viewCalendarSelect').value = justDone.calendarId;
           loadViewEvents(justDone.calendarId);
         }
-        // Clear Preview state and UI so user cannot accidentally re-run the same preview
+        // Only clear preview if we're actually on the preview section (don't interfere with active work)
         try {
-          state.previewEvents = [];
-          const previewContainer = document.getElementById('previewContainer');
-          if (previewContainer) previewContainer.innerHTML = '';
+          const previewSection = document.getElementById('previewSection');
+          if (previewSection && previewSection.style.display !== 'none') {
+            // User is viewing preview, safe to clear
+            console.log('Clearing preview events due to job completion (user on preview tab)');
+            state.previewEvents = [];
+            const previewContainer = document.getElementById('previewContainer');
+            if (previewContainer) previewContainer.innerHTML = '';
+          } else {
+            console.log('NOT clearing preview events - user not on preview tab');
+          }
           try { document.getElementById('createBtn').disabled = false; } catch (e) {}
-          try { document.getElementById('fromDate').value = ''; } catch (e) {}
-          try { document.getElementById('toDate').value = ''; } catch (e) {}
+          // Removed date field clearing - should not affect Add tab when jobs complete
         } catch (e) { /* ignore UI errors */ }
       }
     }
