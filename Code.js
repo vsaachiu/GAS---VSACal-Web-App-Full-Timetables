@@ -477,40 +477,223 @@ function createCalendarEvents(eventsToCreate, calendarId) {
   console.log('Created Events:', createdEventData);
   console.log('Errors:', errors);
 
-  // Generate report spreadsheet on the server so it is created even if the client disconnects
+  // Report is now handled through the central Schoogle spreadsheet
   var reportUrl = null;
-  try {
-    reportUrl = createReportSpreadsheet(createdEventData);
-    console.log('Report URL:', reportUrl);
-  } catch (repErr) {
-    console.error('createReportSpreadsheet failed', repErr);
-  }
+  // No need to create individual report spreadsheets - events are tracked in central spreadsheet
 
   return { success: errors.length === 0, createdEvents: createdEventData, errors: errors, reportUrl: reportUrl };
 }
 
 // --- Background job queue helpers ---------------------------------
-function getJobsSheet() {
-  var PROP = PropertiesService.getScriptProperties().getProperty('JOBS_SPREADSHEET_ID');
-  var ss;
-  try {
-    if (PROP) ss = SpreadsheetApp.openById(PROP);
-  } catch (e) { ss = null; }
-  if (!ss) ss = SpreadsheetApp.getActive();
-  var name = 'Schoogle_Jobs';
-  var sh = ss.getSheetByName(name);
-  if (!sh) {
-    sh = ss.insertSheet(name);
-    var headers = ['jobId','payloadFileId','createdAt','status','done','total','reportUrl','errorsFileId','createdEventsFileId','owner'];
-    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
-  }
-  return sh;
+// Legacy functions removed - now using central Schoogle spreadsheet approach
+
+// --- Central Schoogle spreadsheet (per-user) helpers -------------------------
+function getOrCreateSchoogleConfigFile_(folder) {
+  var files = folder.getFilesByName('schoogle.json');
+  if (files.hasNext()) return files.next();
+  return folder.createFile('schoogle.json', '{}');
 }
 
-function setJobsSpreadsheetId(id) {
-  if (!id) throw new Error('Invalid id');
-  PropertiesService.getScriptProperties().setProperty('JOBS_SPREADSHEET_ID', id);
-  return id;
+function getOrCreateSchoogleSpreadsheet() {
+  var folder = getUserJobsFolder();
+  var cfgFile = getOrCreateSchoogleConfigFile_(folder);
+  var cfg = {};
+  try { cfg = JSON.parse(cfgFile.getBlob().getDataAsString() || '{}'); } catch (e) { cfg = {}; }
+
+  var ss, id = cfg.spreadsheetId || '';
+  if (id) {
+    try { ss = SpreadsheetApp.openById(id); } catch (e) { ss = null; }
+  }
+  if (!ss) {
+    ss = SpreadsheetApp.create('Schoogle');
+    // move into SchoogleJobs folder
+    try {
+      var sfile = DriveApp.getFileById(ss.getId());
+      folder.addFile(sfile);
+      DriveApp.getRootFolder().removeFile(sfile);
+    } catch (e) { /* ignore */ }
+    cfg.spreadsheetId = ss.getId();
+    cfg.url = ss.getUrl();
+    cfg.owner = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail() || '';
+    cfg.updatedAt = new Date().toISOString();
+    try { cfgFile.setContent(JSON.stringify(cfg)); } catch (e) { /* ignore */ }
+  }
+
+  // ensure JOBS sheet exists with header
+  var sh = ss.getSheetByName('JOBS');
+  if (!sh) sh = ss.insertSheet('JOBS');
+  if (sh.getLastRow() === 0) {
+    sh.getRange(1,1,1,18).setValues([[
+      'jobId','status','calendarId','title','startDateTime','endDateTime','location',
+      'day','periodId','dayType','schoogleEventId','createdEventId','error',
+      'owner','createdAt','takenAt','doneAt','workerRunId'
+    ]]);
+  }
+  // ensure Created Events sheet exists (central log of created events)
+  var ce = ss.getSheetByName('Created Events');
+  if (!ce) ce = ss.insertSheet('Created Events');
+  if (ce.getLastRow() === 0) {
+    ce.getRange(1,1,1,10).setValues([[
+      'Title','Start','End','Location','GoogleEventID','CalID','Day','Period','DayType','SchoogleEventID'
+    ]]);
+  }
+  // ensure Job Log exists (used to avoid duplicate completion emails)
+  var jl = ss.getSheetByName('Job Log');
+  if (!jl) jl = ss.insertSheet('Job Log');
+  if (jl.getLastRow() === 0) {
+    jl.getRange(1,1,1,5).setValues([[ 'jobId','timestamp','type','message','count' ]]);
+  }
+  return { id: ss.getId(), url: ss.getUrl(), ss: ss, folder: folder };
+}
+
+function getJobsSheetCentral_() {
+  var sc = getOrCreateSchoogleSpreadsheet();
+  var sh = sc.ss.getSheetByName('JOBS');
+  if (!sh) sh = sc.ss.insertSheet('JOBS');
+  if (sh.getLastRow() === 0) {
+    sh.getRange(1,1,1,18).setValues([[
+      'jobId','status','calendarId','title','startDateTime','endDateTime','location',
+      'day','periodId','dayType','schoogleEventId','createdEventId','error',
+      'owner','createdAt','takenAt','doneAt','workerRunId'
+    ]]);
+  }
+  return { sh: sh, spreadsheetId: sc.id, spreadsheetUrl: sc.url };
+}
+
+// Column indices (1-based) for JOBS sheet
+var JOBS_COL = {
+  jobId: 1, status: 2, calendarId: 3, title: 4, start: 5, end: 6, location: 7,
+  day: 8, period: 9, dayType: 10, schoogleEventId: 11, createdEventId: 12, error: 13,
+  owner: 14, createdAt: 15, takenAt: 16, doneAt: 17, workerRunId: 18
+};
+
+function getSchoogleSpreadsheetUrl() {
+  var sc = getOrCreateSchoogleSpreadsheet();
+  return { id: sc.id, url: sc.url };
+}
+
+// Get detailed event-level job data for Active Jobs UI
+function listUserJobEvents() {
+  var out = [];
+  try {
+    var central = getJobsSheetCentral_();
+    var sh = central.sh;
+    var lastRow = sh.getLastRow();
+    if (lastRow >= 2) {
+      var vals = sh.getRange(2, 1, lastRow - 1, 18).getValues();
+      vals.forEach(function(r, idx) {
+        var jobId = r[JOBS_COL.jobId - 1] || '';
+        var status = (r[JOBS_COL.status - 1] || '').toString();
+        var calendarId = r[JOBS_COL.calendarId - 1] || 'primary';
+        var title = r[JOBS_COL.title - 1] || '';
+        var startDt = r[JOBS_COL.start - 1];
+        var location = r[JOBS_COL.location - 1] || '';
+        var createdAt = r[JOBS_COL.createdAt - 1] || '';
+        var takenAt = r[JOBS_COL.takenAt - 1] || '';
+        var doneAt = r[JOBS_COL.doneAt - 1] || '';
+        var error = r[JOBS_COL.error - 1] || '';
+        var createdEventId = r[JOBS_COL.createdEventId - 1] || '';
+        
+        if (jobId) {
+          out.push({
+            jobId: jobId,
+            status: status,
+            calendarId: calendarId,
+            title: title,
+            startDateTime: startDt instanceof Date ? startDt.toISOString() : startDt,
+            location: location,
+            createdAt: createdAt instanceof Date ? createdAt.toISOString() : createdAt,
+            takenAt: takenAt instanceof Date ? takenAt.toISOString() : takenAt,
+            doneAt: doneAt instanceof Date ? doneAt.toISOString() : doneAt,
+            error: error,
+            createdEventId: createdEventId // Include Google Calendar event ID for linking
+          });
+        }
+      });
+    }
+  } catch (e) { 
+    console.error('listUserJobEvents error:', e); 
+    return []; // Return empty array instead of letting it continue
+  }
+  // Sort by creation time, newest first
+  out.sort(function(a, b) { 
+    return (new Date(b.createdAt || 0)) - (new Date(a.createdAt || 0)); 
+  });
+  return out;
+}
+
+// Append a single created event to the central Created Events sheet
+function appendCreatedEventCentral_(ss, row) {
+  try {
+    var ce = ss.getSheetByName('Created Events');
+    if (!ce) {
+      ce = ss.insertSheet('Created Events');
+      ce.getRange(1,1,1,10).setValues([[ 'Title','Start','End','Location','GoogleEventID','CalID','Day','Period','DayType','SchoogleEventID' ]]);
+    }
+    ce.appendRow([
+      row.Title || '', row.Start || '', row.End || '', row.Location || '', row.GoogleEventID || '',
+      row.CalID || '', row.Day || '', row.Period || '', row.DayType || '', row.SchoogleEventID || ''
+    ]);
+  } catch (e) { /* ignore */ }
+}
+
+// Build "Class Sessions" sheet by grouping Created Events dates under each Title
+function rebuildClassSessionsFromCreated_(ss) {
+  try {
+    var ce = ss.getSheetByName('Created Events');
+    if (!ce) return;
+    var cs = ss.getSheetByName('Class Sessions');
+    if (cs) ss.deleteSheet(cs);
+    cs = ss.insertSheet('Class Sessions');
+    var last = ce.getLastRow();
+    if (last < 2) return;
+    var vals = ce.getRange(2,1,last-1,10).getValues();
+    var byTitle = {};
+    for (var i=0;i<vals.length;i++) {
+      var title = (vals[i][0] || '').toString();
+      if (!title) continue;
+      var start = vals[i][1];
+      if (!byTitle[title]) byTitle[title] = [];
+      byTitle[title].push(start instanceof Date ? start : new Date(start));
+    }
+    var titles = Object.keys(byTitle).sort();
+    if (!titles.length) return;
+    var maxRows = 0;
+    titles.forEach(function(t){ byTitle[t].sort(function(a,b){ return a.getTime()-b.getTime(); }); if (byTitle[t].length>maxRows) maxRows = byTitle[t].length; });
+    cs.getRange(1,1,1,titles.length).setValues([titles]);
+    for (var r=0;r<maxRows;r++) {
+      var row = [];
+      for (var c=0;c<titles.length;c++) row.push(byTitle[titles[c]][r] || '');
+      cs.getRange(2 + r, 1, 1, titles.length).setValues([row]);
+    }
+    try { if (maxRows>0) cs.getRange(2,1,maxRows,titles.length).setNumberFormat('dd-MMM (ddd) HH:mm'); } catch (e) {}
+    cs.autoResizeColumns(1, titles.length);
+  } catch (e) { /* ignore */ }
+}
+
+function jobCompletionAlreadyLogged_(ss, jobId) {
+  try {
+    var jl = ss.getSheetByName('Job Log');
+    if (!jl) return false;
+    var last = jl.getLastRow();
+    if (last < 2) return false;
+    var vals = jl.getRange(2,1,last-1,5).getValues();
+    for (var i=0;i<vals.length;i++) {
+      if ((vals[i][0]||'') === jobId && (vals[i][2]||'') === 'completed') return true;
+    }
+  } catch (e) { /* ignore */ }
+  return false;
+}
+
+function logJobCompleted_(ss, jobId, count) {
+  try {
+    var jl = ss.getSheetByName('Job Log');
+    if (!jl) {
+      jl = ss.insertSheet('Job Log');
+      jl.getRange(1,1,1,5).setValues([[ 'jobId','timestamp','type','message','count' ]]);
+    }
+    jl.appendRow([ jobId, new Date(), 'completed', 'Job completed', count || 0 ]);
+  } catch (e) { /* ignore */ }
 }
 
 // Ensure a per-user worker trigger exists (creates an installable trigger under the
@@ -525,130 +708,78 @@ function ensureUserWorkerTrigger() {
   }
   // create a minute-based trigger running as the current user
   // run less frequently to reduce polling when idle
-  ScriptApp.newTrigger('processUserJobs').timeBased().everyMinutes(5).create();
+  ScriptApp.newTrigger('processUserJobs').timeBased().everyMinutes(1).create();
 }
 
 function enqueueJob(events, calendarId) {
-  // Per-user enqueue: store job in the user's Drive under a SchoogleJobs folder and
-  // create a per-user trigger to process jobs. This ensures Calendar inserts run
-  // with the user's credentials (so events appear in their calendar).
+  // Centralized: append events to per-user Schoogle spreadsheet (JOBS sheet)
   var jobId = 'job_' + Utilities.getUuid();
-  var owner = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
-  var payload = { jobId: jobId, events: events || [], calendarId: calendarId || 'primary', owner: owner, createdAt: (new Date()).toISOString(), status: 'queued', done: 0, total: (events || []).length, reportUrl: null, errors: [], createdEvents: [], startedAt: null, lastUpdated: (new Date()).toISOString() };
+  var owner = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail() || '';
+  var now = new Date();
+  var central = getJobsSheetCentral_();
+  var sh = central.sh;
 
-  // Ensure user's SchoogleJobs folder exists
-  var folder = getUserJobsFolder();
-  var file = folder.createFile(jobId + '.json', JSON.stringify(payload));
+  if (!Array.isArray(events) || events.length === 0) return jobId;
 
-  // Create the Schoogle Timetable spreadsheet for this job inside the user's SchoogleJobs folder
+  var rows = events.map(function(ev) {
+    return [
+      jobId, 'queued', (calendarId || 'primary'),
+      (ev.title || ''),
+      new Date(ev.startDateTime), new Date(ev.endDateTime),
+      (ev.location || ''),
+      (ev.day || ''), (ev.periodId || ''), (ev.dayType || ''),
+      (ev.schoogleEventId || ''),
+      '', // createdEventId
+      '', // error
+      owner,
+      now, // createdAt
+      '',  // takenAt
+      '',  // doneAt
+      ''   // workerRunId
+    ];
+  });
+
+  var lock = LockService.getScriptLock();
   try {
-    var ssInfo = createJobSpreadsheetForJob(jobId, folder);
-    if (ssInfo && ssInfo.id) {
-      payload.spreadsheetId = ssInfo.id;
-      payload.spreadsheetUrl = ssInfo.url;
-      // persist payload with spreadsheet info
-      try { file.setContent(JSON.stringify(payload)); } catch (e) { /* ignore */ }
-    }
-  } catch (e) { /* non-fatal */ }
+    lock.waitLock(30000);
+    var startRow = sh.getLastRow() + 1;
+    sh.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
 
-  // Create per-user trigger if not present
-  try { ensureUserWorkerTrigger(); } catch (e) { /* non-fatal */ }
-
+  try { ensureUserWorkerTrigger(); } catch (e) { /* ignore */ }
   return jobId;
-}
-
-// Save job payload back to its Drive file (best-effort)
-function _saveJobFileContent(file, payload) {
-  try { file.setContent(JSON.stringify(payload)); } catch (e) { /* ignore write errors */ }
 }
 
 // Remove the per-user installable trigger for processUserJobs if there are no queued/running jobs
 function _removeUserWorkerTriggerIfIdle() {
   try {
-    var folder = getUserJobsFolder();
-    var files = folder.getFiles();
+    var central = getJobsSheetCentral_();
+    var sh = central.sh;
+    var lastRow = sh.getLastRow();
     var hasActive = false;
-    while (files.hasNext()) {
-      var f = files.next();
-      try {
-        if (!f.getName().match(/^job_/)) continue;
-        var p = JSON.parse(f.getBlob().getDataAsString());
-        if (p && (p.status === 'queued' || p.status === 'running' || p.status === 'finalizing')) { hasActive = true; break; }
-      } catch (e) { /* ignore parse errors */ }
+    if (lastRow >= 2) {
+      var vals = sh.getRange(2, JOBS_COL.status, lastRow - 1, 1).getValues();
+      for (var i = 0; i < vals.length; i++) {
+        var st = (vals[i][0] || '').toString();
+        if (st === 'queued' || st === 'running') { hasActive = true; break; }
+      }
     }
     if (!hasActive) {
       var projTriggers = ScriptApp.getProjectTriggers();
-      for (var i = 0; i < projTriggers.length; i++) {
-        try {
-          var t = projTriggers[i];
-          if (t.getHandlerFunction && t.getHandlerFunction() === 'processUserJobs') {
-            ScriptApp.deleteTrigger(t);
-            // Log trigger deletion to each job's Job Log sheet (best-effort)
-            try {
-              var files2 = folder.getFiles();
-              while (files2.hasNext()) {
-                var jf = files2.next();
-                if (!jf.getName().match(/^job_/)) continue;
-                try {
-                  var p = JSON.parse(jf.getBlob().getDataAsString());
-                  if (p && p.spreadsheetId) {
-                    appendJobLog(p.spreadsheetId, { workerRunId: '', runStart: '', runEnd: (new Date()).toISOString(), status: 'trigger-removed', message: 'user worker trigger removed (idle)', createdCount: (p.createdEvents || []).length });
-                  }
-                } catch (e) { /* ignore per-file errors */ }
-              }
-            } catch (e) { /* ignore logging errors */ }
-          }
-        } catch (e) { /* ignore */ }
+      for (var t = 0; t < projTriggers.length; t++) {
+        if (projTriggers[t].getHandlerFunction && projTriggers[t].getHandlerFunction() === 'processUserJobs') {
+          ScriptApp.deleteTrigger(projTriggers[t]);
+        }
       }
     }
   } catch (e) { /* ignore */ }
 }
 
-// --- Job spreadsheet helpers ------------------------------------
-function createJobSpreadsheetForJob(jobId, folder) {
-  var ss = SpreadsheetApp.create('Schoogle Timetable - ' + jobId);
-  var id = ss.getId();
-  var url = ss.getUrl();
-  // move the created file into the user's SchoogleJobs folder
-  try {
-    var file = DriveApp.getFileById(id);
-    folder.addFile(file);
-    DriveApp.getRootFolder().removeFile(file);
-  } catch (e) { /* ignore */ }
-  // create sheets: Meta, Job Log, Created Events
-  try {
-    var meta = ss.getSheetByName('Meta') || ss.insertSheet('Meta');
-    meta.clear();
-    meta.getRange(1,1,4,2).setValues([['jobId', jobId], ['status', 'queued'], ['finalized', 'false'], ['reportUrl','']]);
-    var jl = ss.getSheetByName('Job Log') || ss.insertSheet('Job Log');
-    jl.clear();
-    jl.getRange(1,1,1,6).setValues([['workerRunId','runStart','runEnd','status','message','createdCount']]);
-    var ce = ss.getSheetByName('Created Events') || ss.insertSheet('Created Events');
-    ce.clear();
-    ce.getRange(1,1,1,10).setValues([['Title','Start','End','Location','GoogleEventID','CalID','Day','Period','DayType','SchoogleEventID']]);
-  } catch (e) { /* ignore */ }
-  return { id: id, url: url };
-}
-
-function appendJobLog(spreadsheetId, row) {
-  try {
-    var ss = SpreadsheetApp.openById(spreadsheetId);
-    var sh = ss.getSheetByName('Job Log');
-    if (!sh) sh = ss.insertSheet('Job Log');
-    sh.appendRow([row.workerRunId || '', row.runStart || '', row.runEnd || '', row.status || '', row.message || '', row.createdCount || 0]);
-  } catch (e) { /* ignore */ }
-}
-
-function appendCreatedEvents(spreadsheetId, rows) {
-  if (!rows || !rows.length) return;
-  try {
-    var ss = SpreadsheetApp.openById(spreadsheetId);
-    var sh = ss.getSheetByName('Created Events');
-    if (!sh) sh = ss.insertSheet('Created Events');
-    var values = rows.map(function(r){ return [r.Title || '', r.Start || '', r.End || '', r.Location || '', r.GoogleEventID || '', r.CalID || '', r.Day || '', r.Period || '', r.DayType || '', r.SchoogleEventID || '']; });
-    sh.getRange(sh.getLastRow()+1, 1, values.length, values[0].length).setValues(values);
-  } catch (e) { /* ignore */ }
-}
+// --- Legacy job spreadsheet helpers removed ------------------------------------
+// Functions removed: createJobSpreadsheetForJob, appendJobLog, appendCreatedEvents
+// Now using central Schoogle spreadsheet approach with appendCreatedEventCentral_
 
 function readMetaFlag(spreadsheetId, key) {
   try {
@@ -737,87 +868,73 @@ function writeReportToSpreadsheet(spreadsheetId, reportData) {
   } catch (e) { return null; }
 }
 
+// Legacy function: getJobStatus - deprecated in favor of listUserJobs()
+// Kept for backwards compatibility but client now uses listUserJobs() exclusively
 function getJobStatus(jobId) {
-  // Per-user job status: look for job file in the user's SchoogleJobs folder
-  try {
-    var folder = getUserJobsFolder();
-    var files = folder.getFilesByName(jobId + '.json');
-    if (!files.hasNext()) return { jobId: jobId, status: 'notfound' };
-    var file = files.next();
-    var payload = JSON.parse(file.getBlob().getDataAsString());
-    var status = payload.status || 'unknown';
-    var done = Number(payload.done) || 0;
-    var total = Number(payload.total) || 0;
-    var reportUrl = payload.reportUrl || null;
-    var errors = payload.errors || [];
-    var createdCount = (payload.createdEvents && payload.createdEvents.length) || 0;
-    // Estimate remaining time (seconds) based on startedAt if available
-    var estSeconds = null;
-    try {
-      if (payload.startedAt && done > 0) {
-        var started = new Date(payload.startedAt).getTime();
-        var now = new Date().getTime();
-        var elapsed = Math.max(1, Math.round((now - started) / 1000));
-        var rate = elapsed / done; // seconds per item
-        estSeconds = Math.round(rate * Math.max(0, total - done));
-      }
-    } catch (e) { estSeconds = null; }
-  return { jobId: jobId, status: status, progress: { done: done, total: total, created: createdCount, estSeconds: estSeconds }, reportUrl: reportUrl, spreadsheetUrl: payload.spreadsheetUrl || null, errors: errors };
-  } catch (e) {
-    return { jobId: jobId, status: 'error', error: e.toString() };
-  }
+  // Delegate to listUserJobs and filter for the specific job
+  var allJobs = listUserJobs();
+  var matchingJob = allJobs.find(function(j) { return j.jobId === jobId; });
+  if (!matchingJob) return { jobId: jobId, status: 'notfound' };
+  
+  return {
+    jobId: jobId,
+    status: matchingJob.status,
+    progress: { done: matchingJob.done, total: matchingJob.total, created: matchingJob.done, errors: matchingJob.errors, estSeconds: null },
+    reportUrl: matchingJob.reportUrl,
+    spreadsheetUrl: matchingJob.spreadsheetUrl,
+    errors: matchingJob.errors
+  };
 }
 
 // List all jobs for the current user (metadata only)
 function listUserJobs() {
   var out = [];
   try {
-    var folder = getUserJobsFolder();
-    var files = folder.getFiles();
-    while (files.hasNext()) {
-      var f = files.next();
-      if (!f.getName().match(/^job_/)) continue;
-      try {
-        var payload = JSON.parse(f.getBlob().getDataAsString());
-      } catch (e) { continue; }
-  out.push({ jobId: payload.jobId || f.getName().replace(/\.json$/, ''), status: payload.status || 'unknown', done: Number(payload.done) || 0, total: Number(payload.total) || 0, reportUrl: payload.reportUrl || null, spreadsheetUrl: payload.spreadsheetUrl || null, createdCount: (payload.createdEvents && payload.createdEvents.length) || 0, errors: (payload.errors && payload.errors.length) || 0, startedAt: payload.startedAt || null, lastUpdated: payload.lastUpdated || null });
+    var central = getJobsSheetCentral_();
+    var sh = central.sh;
+    var lastRow = sh.getLastRow();
+    if (lastRow >= 2) {
+      var vals = sh.getRange(2, 1, lastRow - 1, 18).getValues();
+      var byJob = {};
+      vals.forEach(function(r){
+        var jid = r[JOBS_COL.jobId - 1];
+        if (!jid) return;
+        var st = (r[JOBS_COL.status - 1] || '').toString();
+        var createdAt = r[JOBS_COL.createdAt - 1] || '';
+        if (!byJob[jid]) byJob[jid] = { jobId: jid, total: 0, done: 0, errors: 0, lastUpdated: '', status: 'queued', spreadsheetUrl: central.spreadsheetUrl, reportUrl: central.spreadsheetUrl, startedAt: '' };
+        byJob[jid].total += 1;
+        if (st === 'done') byJob[jid].done += 1;
+        if (st === 'error') byJob[jid].errors += 1;
+        if (st === 'running') byJob[jid].status = 'running';
+        var ts = r[JOBS_COL.doneAt - 1] || r[JOBS_COL.takenAt - 1] || createdAt || '';
+        if (ts) byJob[jid].lastUpdated = ts instanceof Date ? ts.toISOString() : ts;
+        var startedAt = r[JOBS_COL.takenAt - 1] || createdAt || '';
+        if (st === 'running' && !byJob[jid].startedAt) byJob[jid].startedAt = startedAt instanceof Date ? startedAt.toISOString() : startedAt;
+      });
+      Object.keys(byJob).forEach(function(k){
+        var j = byJob[k];
+        if (j.done + j.errors === j.total && j.status !== 'running') j.status = 'done';
+        out.push({ 
+          jobId: j.jobId, 
+          status: j.status, 
+          done: j.done, 
+          total: j.total, 
+          reportUrl: j.reportUrl, 
+          spreadsheetUrl: j.spreadsheetUrl, 
+          createdCount: j.done, 
+          errors: j.errors, 
+          startedAt: j.startedAt, 
+          lastUpdated: j.lastUpdated 
+        });
+      });
     }
   } catch (e) { /* ignore */ }
-  // sort by createdAt desc if present
-  out.sort(function(a,b){ return (b.lastUpdated || '') .localeCompare(a.lastUpdated || ''); });
+  out.sort(function(a,b){ return (new Date(b.lastUpdated || 0)) - (new Date(a.lastUpdated || 0)); });
 
-  // If no jobs found, attempt a safe trigger cleanup: acquire a user lock, re-scan, and remove per-user trigger if still empty
-  if (out.length === 0) {
-    var ulock = LockService.getUserLock();
-    var acquired = false;
-    try {
-      acquired = ulock.tryLock(5000);
-      if (acquired) {
-        // re-scan folder to avoid races with concurrent enqueue
-        // Only treat a file as an active job if it parses as JSON and its status
-        // is one of queued|running|finalizing. This ignores folders and unrelated files.
-        var folder2 = getUserJobsFolder();
-        var files2 = folder2.getFiles();
-        var anyJob = false;
-        while (files2.hasNext()) {
-          var ff = files2.next();
-          if (!ff.getName().match(/^job_/)) continue;
-          try {
-            var p = JSON.parse(ff.getBlob().getDataAsString());
-            if (p && (p.status === 'queued' || p.status === 'running' || p.status === 'finalizing')) { anyJob = true; break; }
-          } catch (e) {
-            // not a valid job file; ignore and continue
-            continue;
-          }
-        }
-        if (!anyJob) {
-          try { _removeUserWorkerTriggerIfIdle(); } catch (e) { /* ignore */ }
-        }
-      }
-    } catch (e) { /* ignore lock errors */ }
-    finally { if (acquired) try { ulock.releaseLock(); } catch (e) { /* ignore */ } }
+  // cleanup triggers if no active
+  if (!out.some(function(j){ return j.status === 'queued' || j.status === 'running'; })) {
+    try { _removeUserWorkerTriggerIfIdle(); } catch (e) { /* ignore */ }
   }
-
   return out;
 }
 
@@ -831,386 +948,164 @@ function getUserJobsFolder() {
 
 // Worker to be installed per-user: scans the user's SchoogleJobs folder and processes queued jobs.
 function processUserJobs() {
-  var lock = LockService.getUserLock();
-  if (!lock.tryLock(30000)) return; // already running for this user
+  //log into the log who is running the process
+  try {Logger.log(Session.getActiveUser().getEmail())} catch (e) { Logger.log(e)/* ignore */ }
+  // Prevent concurrent runs per user
+  var userLock = LockService.getUserLock();
+  if (!userLock.tryLock(30000)) return;
   try {
-    var folder = getUserJobsFolder();
-    var files = folder.getFiles();
+    var central = getJobsSheetCentral_();
+    var sh = central.sh;
     var tz = Session.getScriptTimeZone() || 'Asia/Hong_Kong';
-  var CHUNK = 20;
-    while (files.hasNext()) {
-      var f = files.next();
-      if (!f.getName().match(/^job_/)) continue;
-      try {
-        var payload = JSON.parse(f.getBlob().getDataAsString());
-      } catch (e) { continue; }
-      if (!payload || payload.status !== 'queued' && payload.status !== 'running') continue;
-  var events = payload.events || [];
-      var total = events.length;
-  payload.status = 'running';
-  if (!payload.done) payload.done = 0;
-  if (!payload.startedAt) payload.startedAt = (new Date()).toISOString();
-  // log worker run start into job spreadsheet if available
-  var workerRunId = Utilities.getUuid();
-  try { if (payload.spreadsheetId) appendJobLog(payload.spreadsheetId, { workerRunId: workerRunId, runStart: (new Date()).toISOString(), status: 'running' }); } catch (e) { /* ignore */ }
-      // process a chunk with batched sheet writes
-      var createdRowsThisChunk = [];
-      for (var idx = payload.done; idx < Math.min(payload.done + CHUNK, total); idx++) {
-        var ev = events[idx];
-        try {
-          var resource = {
-            summary: ev.title,
-            location: ev.location || '',
-            start: { dateTime: formatRFC3339(new Date(ev.startDateTime), tz), timeZone: tz },
-            end: { dateTime: formatRFC3339(new Date(ev.endDateTime), tz), timeZone: tz },
-            description: 'SchoogleJob:' + (payload.jobId || '') + ':' + idx,
-            extendedProperties: { private: { Schoogle: 'true', SchoogleEventID: ev.schoogleEventId } }
-          };
-          var created = Calendar.Events.insert(resource, payload.calendarId || 'primary');
-          var createdRow = { Title: ev.title, Start: new Date(ev.startDateTime), End: new Date(ev.endDateTime), Location: ev.location || '', GoogleEventID: created.id, CalID: payload.calendarId || 'primary', Day: ev.day || '', Period: ev.periodId || '', DayType: ev.dayType || '', SchoogleEventID: ev.schoogleEventId };
-          payload.createdEvents = payload.createdEvents || [];
-          payload.createdEvents.push(createdRow);
-          createdRowsThisChunk.push(createdRow);
-        } catch (err) {
-          payload.errors = payload.errors || [];
-          payload.errors.push({ index: idx, message: err && err.message ? err.message : (err + '') });
-        }
-        Utilities.sleep(1000);
-        payload.done = idx + 1;
-        payload.lastUpdated = (new Date()).toISOString();
-      }
-      // batch-append created rows for this chunk (one Sheets call)
-      try { if (payload.spreadsheetId && createdRowsThisChunk.length) appendCreatedEvents(payload.spreadsheetId, createdRowsThisChunk); } catch (e) { /* ignore */ }
-      // persist updated payload back to file
-      try { f.setContent(JSON.stringify(payload)); } catch (e) { /* ignore */ }
+    var CHUNK = 12;
 
-      // finalize if complete
-      if (payload.done >= total) {
-        payload.status = 'finalizing';
-        payload.lastUpdated = (new Date()).toISOString();
-        try { f.setContent(JSON.stringify(payload)); } catch (e) { /* ignore */ }
-        // Check spreadsheet Meta for finalized flag
-        var finalized = null;
-        try { if (payload.spreadsheetId) finalized = readMetaFlag(payload.spreadsheetId, 'finalized'); } catch (e) { finalized = null; }
-        if (finalized !== 'true') {
-          // perform final report write into spreadsheet
-          try {
-            var reportUrl = null;
-            if (payload.spreadsheetId) reportUrl = writeReportToSpreadsheet(payload.spreadsheetId, payload.createdEvents || []);
-            // update payload
-            payload.reportUrl = reportUrl || payload.reportUrl || null;
-            payload.status = 'done';
-            payload.lastUpdated = (new Date()).toISOString();
-            try { f.setContent(JSON.stringify(payload)); } catch (e) { /* ignore */ }
-            // set Meta.finalized = true and record reportUrl
-            try { if (payload.spreadsheetId) { setMetaFlag(payload.spreadsheetId, 'finalized', 'true'); setMetaFlag(payload.spreadsheetId, 'reportUrl', payload.reportUrl || ''); appendJobLog(payload.spreadsheetId, { workerRunId: workerRunId, runStart: '', runEnd: (new Date()).toISOString(), status: 'finalized', message: '', createdCount: (payload.createdEvents || []).length }); } } catch (e) { /* ignore */ }
-            // notify user
-            try {
-              var ownerEmail = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
-              if (ownerEmail) {
-                var subject = 'Schoogle: Job ' + (payload.jobId || '') + ' completed';
-                var body = 'Your Schoogle job has completed.\n\nCreated events: ' + ((payload.createdEvents && payload.createdEvents.length) || 0) + '\nReport: ' + (payload.reportUrl || '') + '\n\nIf you did not expect this, contact the administrator.';
-                MailApp.sendEmail(ownerEmail, subject, body);
-              }
-            } catch (mailErr) { /* ignore */ }
-            // Move spreadsheet and job JSON into SCHOOGLE COMPLETED folder and rename spreadsheet with completion timestamp
-            try {
-              var jobsFolder = getUserJobsFolder();
-              var completeIter = jobsFolder.getFoldersByName('SCHOOGLE COMPLETED');
-              var completeFolder = completeIter && completeIter.hasNext() ? completeIter.next() : jobsFolder.createFolder('SCHOOGLE COMPLETED');
-              var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Hong_Kong', 'yyyy-MM-dd_HHmmss');
-              if (payload.spreadsheetId) {
-                try {
-                  var sfile = DriveApp.getFileById(payload.spreadsheetId);
-                  try { sfile.setName('Schoogle Timetable - ' + ts); } catch (e) { /* ignore */ }
-                  try { completeFolder.addFile(sfile); } catch (e) { /* ignore */ }
-                  try { jobsFolder.removeFile(sfile); } catch (e) { /* ignore */ }
-                } catch (e) { /* ignore */ }
-              }
-              // move the job json file (f) into SCHOOGLE COMPLETED
-              try { if (f) { completeFolder.addFile(f); try { jobsFolder.removeFile(f); } catch (e) { /* ignore */ } } } catch (e) { /* ignore */ }
-            } catch (e) { /* ignore cleanup errors */ }
-          } catch (finalErr) {
-            payload.status = 'error';
-            payload.errors = payload.errors || [];
-            payload.errors.push({ finalization: finalErr.toString() });
-            payload.lastUpdated = (new Date()).toISOString();
-            try { f.setContent(JSON.stringify(payload)); } catch (e) { /* ignore */ }
-            try { if (payload.spreadsheetId) appendJobLog(payload.spreadsheetId, { workerRunId: workerRunId, runStart: '', runEnd: (new Date()).toISOString(), status: 'error', message: finalErr.toString(), createdCount: (payload.createdEvents || []).length }); } catch (e) { /* ignore */ }
-            try {
-              var ownerEmail2 = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
-              if (ownerEmail2) {
-                var subject2 = 'Schoogle: Job ' + (payload.jobId || '') + ' failed';
-                var body2 = 'Your Schoogle job encountered an error during finalization.\n\nError: ' + finalErr.toString() + '\nPlease check the job file in your Drive.';
-                MailApp.sendEmail(ownerEmail2, subject2, body2);
-              }
-            } catch (mailErr2) { /* ignore */ }
-          }
-        } else {
-          // already finalized; ensure payload updated and log
-          payload.status = 'done';
-          try { f.setContent(JSON.stringify(payload)); } catch (e) { /* ignore */ }
-          try { if (payload.spreadsheetId) appendJobLog(payload.spreadsheetId, { workerRunId: workerRunId, runStart: '', runEnd: (new Date()).toISOString(), status: 'skipped-finalize', message: 'already finalized', createdCount: (payload.createdEvents || []).length }); } catch (e) { /* ignore */ }
-        }
-        // If no more active jobs, remove per-user trigger to avoid idle runs
-        try { _removeUserWorkerTriggerIfIdle(); } catch (e) { /* ignore */ }
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) return; // nothing queued
+
+    // Claim next CHUNK queued rows under a script-level lock
+    var scriptLock = LockService.getScriptLock();
+    scriptLock.waitLock(30000);
+  var vals = sh.getRange(2, 1, lastRow - 1, 18).getValues();
+  // Use a timestamp-based run id for traceability, e.g. 20250820_143512_123
+  var workerRunId = Utilities.formatDate(new Date(), tz, 'yyyyMMdd_HHmmss_SSS');
+  var now = new Date();
+    var claimIndexes = [];
+    for (var i = 0; i < vals.length && claimIndexes.length < CHUNK; i++) {
+      if ((vals[i][JOBS_COL.status - 1] || '').toString() === 'queued') {
+        claimIndexes.push(i);
+        vals[i][JOBS_COL.status - 1] = 'running';
+        vals[i][JOBS_COL.takenAt - 1] = now;
+        vals[i][JOBS_COL.workerRunId - 1] = workerRunId;
       }
     }
+    if (claimIndexes.length) {
+      // Write back claims (set non-contiguous columns individually)
+      for (var ci = 0; ci < claimIndexes.length; ci++) {
+        var r = claimIndexes[ci];
+        var sheetRow = r + 2;
+        // status -> running
+        sh.getRange(sheetRow, JOBS_COL.status).setValue('running');
+        // takenAt -> now
+        sh.getRange(sheetRow, JOBS_COL.takenAt).setValue(now);
+        // workerRunId -> id
+        sh.getRange(sheetRow, JOBS_COL.workerRunId).setValue(workerRunId);
+      }
+    }
+    scriptLock.releaseLock();
+
+    if (!claimIndexes.length) {
+      // no queued rows; consider removing trigger
+      try { _removeUserWorkerTriggerIfIdle(); } catch (e) { /* ignore */ }
+      return;
+    }
+
+    // Process claimed rows
+    var sc = getOrCreateSchoogleSpreadsheet();
+    var processedJobIds = {};
+    for (var k = 0; k < claimIndexes.length; k++) {
+      var idx = claimIndexes[k];
+      var rowNum = idx + 2; // sheet row number
+      var row = vals[idx];
+      var jobId = row[JOBS_COL.jobId - 1] || '';
+      var calendarId = row[JOBS_COL.calendarId - 1] || 'primary';
+      var title = row[JOBS_COL.title - 1] || '';
+      var location = row[JOBS_COL.location - 1] || '';
+      var schoogleEventId = row[JOBS_COL.schoogleEventId - 1] || '';
+      var startDt = new Date(row[JOBS_COL.start - 1]);
+      var endDt = new Date(row[JOBS_COL.end - 1]);
+      var createdEventId = '';
+      var errorMsg = '';
+
+      try {
+        var resource = {
+          summary: title,
+          location: location,
+          start: { dateTime: formatRFC3339(startDt, tz), timeZone: tz },
+          end: { dateTime: formatRFC3339(endDt, tz), timeZone: tz },
+          extendedProperties: { private: { Schoogle: 'true', SchoogleEventID: schoogleEventId } }
+        };
+        var created = Calendar.Events.insert(resource, calendarId);
+        createdEventId = created.id || '';
+      } catch (err) {
+        errorMsg = (err && err.message) ? err.message : String(err);
+      }
+      Utilities.sleep(1000);
+
+  // Update status cells for this row (set non-contiguous columns correctly)
+  var status = createdEventId ? 'done' : 'error';
+  var doneAt = new Date();
+  // createdEventId
+  sh.getRange(rowNum, JOBS_COL.createdEventId).setValue(createdEventId);
+  // error
+  sh.getRange(rowNum, JOBS_COL.error).setValue(errorMsg);
+  // doneAt
+  sh.getRange(rowNum, JOBS_COL.doneAt).setValue(doneAt);
+  // workerRunId (keep for traceability)
+  sh.getRange(rowNum, JOBS_COL.workerRunId).setValue(workerRunId);
+  // status
+  sh.getRange(rowNum, JOBS_COL.status).setValue(status);
+      // If event was created, append to central Created Events
+      if (createdEventId) {
+        appendCreatedEventCentral_(sc.ss, {
+          Title: title,
+          Start: startDt,
+          End: endDt,
+          Location: location,
+          GoogleEventID: createdEventId,
+          CalID: calendarId,
+          Day: row[JOBS_COL.day - 1] || '',
+          Period: row[JOBS_COL.period - 1] || '',
+          DayType: row[JOBS_COL.dayType - 1] || '',
+          SchoogleEventID: schoogleEventId
+        });
+      }
+      if (jobId) processedJobIds[jobId] = true;
+    }
+
+    // Try to stop trigger if idle
+    try { _removeUserWorkerTriggerIfIdle(); } catch (e) { /* ignore */ }
+
+    // For each processed job, if it's now complete, rebuild Class Sessions and send one completion email
+    try {
+      var allLast = sh.getLastRow();
+      var allVals = allLast > 1 ? sh.getRange(2,1,allLast-1,18).getValues() : [];
+      var ownerEmail = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail() || '';
+      for (var jid in processedJobIds) {
+        var anyActive = false, total = 0, createdCount = 0, errorCount = 0;
+        for (var i2=0;i2<allVals.length;i2++) {
+          if ((allVals[i2][JOBS_COL.jobId - 1] || '') !== jid) continue;
+          total++;
+          var st2 = (allVals[i2][JOBS_COL.status - 1] || '').toString();
+          if (st2 === 'queued' || st2 === 'running') anyActive = true;
+          if (st2 === 'done' && (allVals[i2][JOBS_COL.createdEventId - 1] || '')) createdCount++;
+          if (st2 === 'error') errorCount++;
+        }
+        if (!anyActive && total > 0) {
+          // All rows for this job are finished
+          rebuildClassSessionsFromCreated_(sc.ss);
+          if (!jobCompletionAlreadyLogged_(sc.ss, jid)) {
+            try {
+              if (ownerEmail) {
+                var subj = 'Schoogle: Events Created!';
+                var body = 'Your Schoogle job has completed.\n\nCreated events: ' + createdCount + '\nErrors: ' + errorCount + '\nSpreadsheet: ' + sc.url + '\n';
+                MailApp.sendEmail(ownerEmail, subj, body);
+              }
+            } catch (mailErr) { /* ignore */ }
+            logJobCompleted_(sc.ss, jid, createdCount);
+          }
+        }
+      }
+    } catch (postErr) { /* ignore */ }
   } finally {
-    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+    try { userLock.releaseLock(); } catch (e) {}
   }
 }
 
 // Worker: run under a time-based trigger. Processes small chunks and persists progress.
-function processJobs() {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) return; // already running elsewhere
-  try {
-    var sh = getJobsSheet();
-    var vals = sh.getDataRange().getValues();
-    var pickRow = -1;
-    for (var i = 1; i < vals.length; i++) {
-      if ((vals[i][3] || '').toString() === 'queued') { pickRow = i + 1; break; }
-    }
-    if (pickRow === -1) return; // nothing to do
+// Legacy function processJobs() removed - now using processUserJobs() with central spreadsheet
 
-    // mark running
-    sh.getRange(pickRow, 4).setValue('running');
-
-    var payloadFileId = sh.getRange(pickRow, 2).getValue();
-    var payload = {};
-    try { payload = JSON.parse(DriveApp.getFileById(payloadFileId).getBlob().getDataAsString()); } catch (e) { payload = {}; }
-    var events = payload.events || [];
-    var total = events.length;
-    var done = Number(sh.getRange(pickRow, 5).getValue()) || 0;
-
-    var createdFileId = sh.getRange(pickRow, 9).getValue() || '';
-    var createdArr = [];
-    if (createdFileId) {
-      try { createdArr = JSON.parse(DriveApp.getFileById(createdFileId).getBlob().getDataAsString()) || []; } catch (e) { createdArr = []; }
-    }
-
-    var errorsFileId = sh.getRange(pickRow, 8).getValue() || '';
-    var errorsArr = [];
-    if (errorsFileId) {
-      try { errorsArr = JSON.parse(DriveApp.getFileById(errorsFileId).getBlob().getDataAsString()) || []; } catch (e) { errorsArr = []; }
-    }
-
-  var CHUNK = 30;
-    var tz = Session.getScriptTimeZone() || 'Asia/Hong_Kong';
-    for (var idx = done; idx < Math.min(done + CHUNK, total); idx++) {
-      var ev = events[idx];
-      try {
-        var resource = {
-          summary: ev.title,
-          location: ev.location || '',
-          start: { dateTime: formatRFC3339(new Date(ev.startDateTime), tz), timeZone: tz },
-          end: { dateTime: formatRFC3339(new Date(ev.endDateTime), tz), timeZone: tz },
-          description: 'SchoogleJob:' + (sh.getRange(pickRow,1).getValue() || '') + ':' + idx,
-          extendedProperties: { private: { Schoogle: 'true', SchoogleEventID: ev.schoogleEventId } }
-        };
-        var created = Calendar.Events.insert(resource, payload.calendarId || 'primary');
-        createdArr.push({ Title: ev.title, Start: new Date(ev.startDateTime), End: new Date(ev.endDateTime), Location: ev.location || '', GoogleEventID: created.id, CalID: payload.calendarId || 'primary', Day: ev.day || '', Period: ev.periodId || '', DayType: ev.dayType || '', SchoogleEventID: ev.schoogleEventId });
-      } catch (err) {
-        errorsArr.push({ index: idx, message: err && err.message ? err.message : (err + '') });
-      }
-      Utilities.sleep(1000);
-      // persist progress after each item
-      sh.getRange(pickRow, 5).setValue(idx + 1);
-    }
-
-    // persist createdArr
-    if (createdArr.length) {
-      if (createdFileId) {
-        try {
-          var existing = JSON.parse(DriveApp.getFileById(createdFileId).getBlob().getDataAsString()) || [];
-        } catch (e) { existing = []; }
-        var merged = existing.concat(createdArr);
-        DriveApp.getFileById(createdFileId).setContent(JSON.stringify(merged));
-      } else {
-        var f = DriveApp.createFile((sh.getRange(pickRow,1).getValue() || 'job') + '_created.json', JSON.stringify(createdArr));
-        sh.getRange(pickRow, 9).setValue(f.getId());
-      }
-    }
-
-    // persist errors
-    if (errorsArr.length) {
-      if (errorsFileId) {
-        try { var existingE = JSON.parse(DriveApp.getFileById(errorsFileId).getBlob().getDataAsString()) || []; } catch (e) { existingE = []; }
-        var mergedE = existingE.concat(errorsArr);
-        DriveApp.getFileById(errorsFileId).setContent(JSON.stringify(mergedE));
-      } else {
-        var ef = DriveApp.createFile((sh.getRange(pickRow,1).getValue() || 'job') + '_errors.json', JSON.stringify(errorsArr));
-        sh.getRange(pickRow, 8).setValue(ef.getId());
-      }
-    }
-
-    // finalize if complete
-    var newDone = Number(sh.getRange(pickRow, 5).getValue()) || 0;
-    if (newDone >= total) {
-      // Use a guard file flag to ensure finalization happens only once
-      var createdIdNow = sh.getRange(pickRow, 9).getValue() || '';
-      var createdAll = [];
-      try { createdAll = JSON.parse(DriveApp.getFileById(createdIdNow).getBlob().getDataAsString()) || []; } catch (e) { createdAll = []; }
-      var ownerEmail = (sh.getRange(pickRow, 10).getValue() || '').toString();
-      // read the jobId cell for naming
-      var jobIdCell = (sh.getRange(pickRow,1).getValue() || '').toString();
-      // store a small finalization marker file inside the user's SchoogleJobs folder to prevent duplicate finalization
-      var finalMarkerName = jobIdCell + '_finalized.marker';
-      var finalMarker = null;
-      try {
-        var jobsFolder = getUserJobsFolder();
-        var filesIter = jobsFolder.getFilesByName(finalMarkerName);
-        if (filesIter && filesIter.hasNext()) finalMarker = filesIter.next();
-        else finalMarker = jobsFolder.createFile(finalMarkerName, new Date().toISOString());
-      } catch (e) { finalMarker = null; }
-      // If marker newly created (or exists), proceed; otherwise skip duplicate finalization
-      var doFinalize = true;
-      try {
-        if (finalMarker) {
-          // check content: if content contains 'done' timestamp, skip
-          var content = '';
-          try { content = finalMarker.getBlob().getDataAsString(); } catch (e) { content = ''; }
-          if (content && content.indexOf('FINALIZED:') === 0) {
-            doFinalize = false;
-          }
-        }
-      } catch (e) { /* ignore */ }
-      if (doFinalize) {
-        try {
-          var reportUrl = createReportSpreadsheet(createdAll);
-          sh.getRange(pickRow, 7).setValue(reportUrl);
-          sh.getRange(pickRow, 4).setValue('done');
-          // write marker
-          try { if (finalMarker) finalMarker.setContent('FINALIZED:' + (new Date()).toISOString()); } catch (e) { /* ignore */ }
-          // Notify job owner via email
-          try {
-            if (ownerEmail) {
-              var subject = 'Schoogle: Job ' + jobIdCell + ' completed';
-              var body = 'Your Schoogle job has completed.\n\nCreated events: ' + (createdAll.length || 0) + '\nReport: ' + reportUrl + '\n\nIf you did not expect this, contact the administrator.';
-              MailApp.sendEmail(ownerEmail, subject, body);
-            }
-          } catch (mailErr) {
-            console.error('MailApp.sendEmail failed', mailErr);
-          }
-        } catch (finalErr) {
-          sh.getRange(pickRow, 4).setValue('error');
-          var ef2 = DriveApp.createFile(jobIdCell + '_final_error.txt', finalErr.toString());
-          sh.getRange(pickRow, 8).setValue(ef2.getId());
-          // Notify owner of failure
-          try {
-            if (ownerEmail) {
-              var subject2 = 'Schoogle: Job ' + jobIdCell + ' failed';
-              var body2 = 'Your Schoogle job encountered an error during finalization.\n\nError: ' + finalErr.toString() + '\nPlease check the job log.';
-              MailApp.sendEmail(ownerEmail, subject2, body2);
-            }
-          } catch (mailErr2) {
-            console.error('MailApp.sendEmail failed (error notification)', mailErr2);
-          }
-        }
-        // Attempt cleanup: move spreadsheet and job JSON into SCHOOGLE COMPLETED folder under user's SchoogleJobs
-        try {
-          var jobsFolder = getUserJobsFolder();
-          var completeIter2 = jobsFolder.getFoldersByName('SCHOOGLE COMPLETED');
-          var completeFolder2 = completeIter2 && completeIter2.hasNext() ? completeIter2.next() : jobsFolder.createFolder('SCHOOGLE COMPLETED');
-          var ts2 = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Hong_Kong', 'yyyy-MM-dd_HHmmss');
-          // if payload.spreadsheetId available, rename and move it
-          try {
-            if (payload && payload.spreadsheetId) {
-              var sfile2 = DriveApp.getFileById(payload.spreadsheetId);
-              try { sfile2.setName('Schoogle Timetable - ' + ts2); } catch (e) { /* ignore */ }
-              try { completeFolder2.addFile(sfile2); } catch (e) { /* ignore */ }
-              try { jobsFolder.removeFile(sfile2); } catch (e) { /* ignore */ }
-            } else if (reportUrl) {
-              // try to extract fileId from reportUrl and move that
-              try {
-                var m = (reportUrl || '').match(/\/d\/([-_a-zA-Z0-9]+)\//);
-                if (m && m[1]) {
-                  var sfile3 = DriveApp.getFileById(m[1]);
-                  try { sfile3.setName('Schoogle Timetable - ' + ts2); } catch (e) { /* ignore */ }
-                  try { completeFolder2.addFile(sfile3); } catch (e) { /* ignore */ }
-                  try { jobsFolder.removeFile(sfile3); } catch (e) { /* ignore */ }
-                }
-              } catch (e) { /* ignore */ }
-            }
-          } catch (e) { /* ignore */ }
-          // Move job JSON file if we can find it by payloadFileId
-          try {
-            if (payloadFileId) {
-              try {
-                var jobFile = DriveApp.getFileById(payloadFileId);
-                completeFolder2.addFile(jobFile);
-                try { jobsFolder.removeFile(jobFile); } catch (e) { /* ignore */ }
-              } catch (e) { /* ignore */ }
-            }
-          } catch (e) { /* ignore */ }
-        } catch (e) { /* ignore */ }
-      }
-      // After attempting finalization, try remove user worker triggers if there are no active jobs
-      try { _removeUserWorkerTriggerIfIdle(); } catch (e) { /* ignore */ }
-    }
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function createReportSpreadsheet(reportData) {
-  // reportData is array of created event rows with keys used above
-  var ss = SpreadsheetApp.create('Schoogle Timetable');
-  var url = ss.getUrl();
-
-  // Created Events sheet
-  var sheet = ss.getActiveSheet();
-  sheet.setName('Created Events');
-  var headers = ['Title', 'Start', 'End', 'Location', 'Google EventID', 'CalID', 'Day', 'Period', 'DayType', 'SchoogleEventID'];
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  if (reportData && reportData.length) {
-    var values = reportData.map(function (r) {
-      return [r.Title, r.Start, r.End, r.Location, r.GoogleEventID, r.CalID, r.Day, r.Period, r.DayType, r.SchoogleEventID];
-    });
-    sheet.getRange(2, 1, values.length, headers.length).setValues(values);
-    sheet.autoResizeColumns(1, headers.length);
-  }
-
-  // Class Sessions sheet
-  var cs = ss.insertSheet('Class Sessions');
-  // Collect unique titles
-  var byTitle = {};
-  (reportData || []).forEach(function (r) {
-    var t = r.Title || '';
-    if (!t) return;
-    if (!byTitle[t]) byTitle[t] = [];
-    byTitle[t].push(new Date(r.Start));
-  });
-  var titles = Object.keys(byTitle).sort();
-  // Prepare columns: each title is a column with sorted times beneath
-  var maxRows = 0;
-  titles.forEach(function (t) {
-    byTitle[t].sort(function (a, b) { return a.getTime() - b.getTime(); });
-    if (byTitle[t].length > maxRows) maxRows = byTitle[t].length;
-  });
-  if (titles.length) {
-    // Headers
-    cs.getRange(1, 1, 1, titles.length).setValues([titles]);
-    // Columns data as rows
-    for (var r = 0; r < maxRows; r++) {
-      var rowVals = [];
-      for (var c = 0; c < titles.length; c++) {
-        rowVals.push(byTitle[titles[c]][r] || '');
-      }
-      cs.getRange(2 + r, 1, 1, titles.length).setValues([rowVals]);
-    }
-    cs.autoResizeColumns(1, titles.length);
-      // Apply date-time formatting to all cells from row 2 onwards
-      try {
-        if (maxRows > 0) {
-          cs.getRange(2, 1, maxRows, titles.length).setNumberFormat('dd-MMM (ddd) HH:mm');
-        }
-      } catch (fmtErr) { /* ignore formatting errors */ }
-  }
-
-  return url;
-}
+// Legacy function removed: createReportSpreadsheet
+// Now using central Schoogle spreadsheet with Created Events and Class Sessions sheets
 
 function getEventsFromCalendar(calendarId) {
   var out = [];

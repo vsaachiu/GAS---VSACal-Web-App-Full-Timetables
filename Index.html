@@ -16,7 +16,7 @@
       <nav class="tabs">
         <button class="tab-btn active" data-tab="addTab">Add</button>
         <button class="tab-btn" data-tab="viewTab">View</button>
-  <button class="tab-btn" data-tab="jobsTab">Jobs</button>
+  <button class="tab-btn" data-tab="jobsTab">Active Jobs <span id="jobsNotificationCount" class="notification-count">0</span></button>
       </nav>
 
       <main>
@@ -102,9 +102,38 @@
         </section>
 
         <section id="jobsTab" class="tab-content">
-          <div class="section-instructions">This shows your queued and completed jobs. Jobs run in your account; install the worker if prompted. Click a report link to open the created spreadsheet.</div>
-          <div class="controls" style="margin-bottom:8px;"><button id="refreshJobsBtn" class="btn mini">Refresh jobs</button></div>
-          <div id="jobsList">Loading jobs…</div>
+          <div class="section-instructions">Monitor your event creation jobs. Jobs run automatically in the background using your account credentials.</div>
+          
+          <div class="controls" style="margin-bottom:16px;">
+            <button id="openSchoogleBtn" class="btn primary mini" style="display:none;">📊 Open Schoogle Spreadsheet</button>
+          </div>
+
+          <!-- Queued Jobs Section -->
+          <div class="jobs-section">
+            <h3>📋 Queued Jobs <span id="queuedCount" class="count-badge">0</span></h3>
+            <div id="queuedJobsList" class="jobs-list">
+              <div class="no-jobs">No jobs queued</div>
+            </div>
+          </div>
+
+          <!-- Running Jobs Section -->
+          <div class="jobs-section">
+            <h3>⚡ Running Jobs <span id="runningCount" class="count-badge">0</span></h3>
+            <div id="runningJobsList" class="jobs-list">
+              <div class="no-jobs">No jobs running</div>
+            </div>
+          </div>
+
+          <!-- Completed Jobs Section -->
+          <div class="jobs-section">
+            <h3 class="collapsible-header" onclick="toggleCompletedJobs()">
+              ✅ Completed Jobs <span id="completedCount" class="count-badge">0</span>
+              <span id="completedToggle" class="toggle-icon">▼</span>
+            </h3>
+            <div id="completedJobsList" class="jobs-list" style="display:none;">
+              <div class="no-jobs">No completed jobs</div>
+            </div>
+          </div>
         </section>
       </main>
     </div>

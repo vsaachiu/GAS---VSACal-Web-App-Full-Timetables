@@ -14,8 +14,305 @@
   // Alias with different casing because console users sometimes use SET/ALLCAPS
   window.setRPCDebug = window.setRpcDebug;
 
-  // --- RPC helper: logs every server request/response with timing ---
-  function summarize(val, path = '') {
+  // --- RPC helper: logs every server request ---
+  
+  let JOBS_POLL_TIMER = null;
+  let POLL_INTERVAL = 30000; // Default 30 seconds
+  const ACTIVE_POLL_INTERVAL = 5000; // 5 seconds when jobs are active
+  const IDLE_POLL_INTERVAL = 30000; // 30 seconds when no active jobs
+  let JOBS_POLL_LAST = [];
+  let JOBS_POLL_SCHOOGLE_URL = null;
+
+  // Helper function to create a job event item
+  function createJobEventItem(event) {
+    const item = document.createElement('div');
+    item.className = 'job-item';
+    
+    const title = document.createElement('div');
+    title.className = 'job-title';
+    title.textContent = event.title || 'Untitled Event';
+    
+    const details = document.createElement('div');
+    details.className = 'job-details';
+    
+    // Format start date/time
+    let dateStr = 'No date';
+    let timeStr = '';
+    try {
+      const startDate = new Date(event.startDateTime);
+      if (!isNaN(startDate.getTime())) {
+        dateStr = startDate.toLocaleDateString();
+        timeStr = startDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+      }
+    } catch (e) { /* ignore */ }
+    
+    // Get calendar name (simplified)
+    const calName = event.calendarId === 'primary' ? 'Primary Calendar' : (event.calendarId || 'Unknown Calendar');
+    
+    const metaElements = [
+      '📅 ' + dateStr + ' ' + timeStr,
+      '📍 ' + (event.location || 'No location'),
+      '📋 ' + calName
+    ];
+    
+    if (event.status === 'error' && event.error) {
+      metaElements.push('❌ ' + event.error);
+    }
+    
+    details.innerHTML = metaElements.map(meta => '<span class="job-meta">' + meta + '</span>').join('');
+    
+    // Add calendar link for completed events
+    if (event.status === 'done' && event.createdEventId) {
+      const calendarLink = document.createElement('button');
+      calendarLink.className = 'btn mini calendar-link';
+      calendarLink.innerHTML = '📅';
+      calendarLink.title = 'Open in Google Calendar';
+      calendarLink.onclick = () => {
+        const calUrl = 'https://calendar.google.com/calendar/u/0/r/eventedit/' + event.createdEventId;
+        window.open(calUrl, '_blank');
+      };
+      
+      const linkContainer = document.createElement('div');
+      linkContainer.style.marginTop = '8px';
+      linkContainer.appendChild(calendarLink);
+      item.appendChild(title);
+      item.appendChild(details);
+      item.appendChild(linkContainer);
+    } else {
+      item.appendChild(title);
+      item.appendChild(details);
+    }
+    
+    return item;
+  }
+
+  // Update notification count on Active Jobs tab
+  function updateJobsNotificationCount(jobSummary) {
+    const notificationCount = document.getElementById('jobsNotificationCount');
+    if (!notificationCount) return;
+    
+    // Defensive check to ensure jobSummary is an array
+    if (!jobSummary || !Array.isArray(jobSummary)) {
+      console.warn('updateJobsNotificationCount called with invalid jobSummary:', jobSummary);
+      jobSummary = [];
+    }
+    
+    const activeJobs = jobSummary.filter(job => job.status === 'queued' || job.status === 'running');
+    const count = activeJobs.length;
+    
+    if (count > 0) {
+      notificationCount.textContent = count;
+      notificationCount.style.display = 'inline-block';
+    } else {
+      notificationCount.style.display = 'none';
+    }
+  }
+
+  // New function to update the Active Jobs UI sections
+  function updateActiveJobsUI(events) {
+    // Defensive check to ensure events is an array
+    if (!events || !Array.isArray(events)) {
+      console.warn('updateActiveJobsUI called with invalid events:', events);
+      events = [];
+    }
+    
+    // Update Schoogle spreadsheet button
+    const openBtn = document.getElementById('openSchoogleBtn');
+    if (openBtn && JOBS_POLL_SCHOOGLE_URL) {
+      openBtn.style.display = 'inline-block';
+      openBtn.onclick = () => window.open(JOBS_POLL_SCHOOGLE_URL, '_blank');
+    } else if (openBtn) {
+      openBtn.style.display = 'none';
+    }
+
+    // Group events by status
+    const queued = events.filter(e => e.status === 'queued');
+    const running = events.filter(e => e.status === 'running');
+    const completed = events.filter(e => e.status === 'done' || e.status === 'error');
+
+    // Update counts
+    const queuedCount = document.getElementById('queuedCount');
+    const runningCount = document.getElementById('runningCount');
+    const completedCount = document.getElementById('completedCount');
+    if (queuedCount) queuedCount.textContent = queued.length;
+    if (runningCount) runningCount.textContent = running.length;
+    if (completedCount) completedCount.textContent = completed.length;
+
+    // Update queued jobs list
+    const queuedList = document.getElementById('queuedJobsList');
+    if (queuedList) {
+      queuedList.innerHTML = '';
+      if (queued.length === 0) {
+        queuedList.innerHTML = '<div class="no-jobs">No jobs queued</div>';
+      } else {
+        queued.forEach(event => {
+          const item = createJobEventItem(event);
+          queuedList.appendChild(item);
+        });
+      }
+    }
+
+    // Update running jobs list
+    const runningList = document.getElementById('runningJobsList');
+    if (runningList) {
+      runningList.innerHTML = '';
+      if (running.length === 0) {
+        runningList.innerHTML = '<div class="no-jobs">No jobs running</div>';
+      } else {
+        running.forEach(event => {
+          const item = createJobEventItem(event);
+          runningList.appendChild(item);
+        });
+      }
+    }
+
+    // Update completed jobs list
+    const completedList = document.getElementById('completedJobsList');
+    if (completedList) {
+      completedList.innerHTML = '';
+      if (completed.length === 0) {
+        completedList.innerHTML = '<div class="no-jobs">No completed jobs</div>';
+      } else {
+        completed.forEach(event => {
+          const item = createJobEventItem(event);
+          completedList.appendChild(item);
+        });
+      }
+    }
+  }
+
+  // Update all job-related UI from the latest listUserJobs and schoogle url
+  function updateJobUIsFromList(jobSummary, jobEvents, schoogle) {
+    // Handle both old and new calling patterns
+    if (arguments.length === 2 && !Array.isArray(jobEvents)) {
+      // Old pattern: updateJobUIsFromList(list, schoogle)
+      schoogle = jobEvents;
+      jobEvents = [];
+      jobSummary = arguments[0];
+    }
+    
+    // Defensive checks to ensure parameters are arrays
+    if (!jobSummary || !Array.isArray(jobSummary)) {
+      console.warn('updateJobUIsFromList: jobSummary is not an array:', jobSummary);
+      jobSummary = [];
+    }
+    if (!jobEvents || !Array.isArray(jobEvents)) {
+      console.warn('updateJobUIsFromList: jobEvents is not an array:', jobEvents);
+      jobEvents = [];
+    }
+    
+    JOBS_POLL_LAST = jobSummary;
+    JOBS_POLL_SCHOOGLE_URL = (schoogle && schoogle.url) ? schoogle.url : null;
+    
+    // Update Active Jobs tab with new structure
+    updateActiveJobsUI(jobEvents);
+    
+    // Update notification count on Active Jobs tab
+    updateJobsNotificationCount(jobSummary);
+    
+    // Update create progress if any job is running
+    const running = JOBS_POLL_LAST.find(j => j.status === 'running');
+    const progress = document.getElementById('createProgress');
+    if (progress) {
+      if (running) {
+        const done = (running.progress && running.progress.done) || running.done || 0;
+        const total = (running.progress && running.progress.total) || running.total || 0;
+        const est = (running.progress && running.progress.estSeconds) || null;
+        let estText = est ? ' ETA ~ ' + Math.round(est/60) + 'm ' + (est%60) + 's' : '';
+        progress.textContent = 'Job ' + (running.id || running.jobId) + ': running — ' + done + '/' + total + (estText ? ' —' + estText : '');
+        try { document.getElementById('createBtn').disabled = true; } catch (e) {}
+      } else {
+        progress.textContent = '';
+        try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+      }
+    }
+    
+    // Update spreadsheet link in progress area if available
+    try {
+      var linkContainer = document.getElementById('createProgressLink');
+      if (!linkContainer) {
+        linkContainer = document.createElement('span');
+        linkContainer.id = 'createProgressLink';
+        progress && progress.parentNode && progress.parentNode.appendChild(linkContainer);
+      }
+      if (running && (running.spreadsheetUrl || JOBS_POLL_SCHOOGLE_URL)) {
+        linkContainer.innerHTML = '';
+        var a = document.createElement('a');
+        a.href = running.spreadsheetUrl || JOBS_POLL_SCHOOGLE_URL;
+        a.target = '_blank';
+        a.textContent = 'Open spreadsheet';
+        a.style.marginLeft = '8px';
+        linkContainer.appendChild(a);
+      } else if (linkContainer) {
+        linkContainer.innerHTML = '';
+      }
+    } catch (e) { /* ignore UI errors */ }
+    
+    // If a job just finished, reset preview state
+    const justDone = JOBS_POLL_LAST.find(j => j.status === 'done' && !j._uiDone);
+    if (justDone) {
+      justDone._uiDone = true;
+      // Removed automatic tab switch to View tab
+      // Optionally reload events for the relevant calendar
+      try {
+        state.previewEvents = [];
+        const previewContainer = document.getElementById('previewContainer');
+        if (previewContainer) previewContainer.innerHTML = '';
+        try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+        try { document.getElementById('fromDate').value = ''; } catch (e) {}
+        try { document.getElementById('toDate').value = ''; } catch (e) {}
+      } catch (e) { /* ignore UI errors */ }
+    }
+  }
+
+  function startJobsPoller() {
+      if (JOBS_POLL_TIMER) return; // already running
+      const poll = () => {
+        Promise.all([
+          rpc('listUserJobs').then(result => Array.isArray(result) ? result : []).catch(() => []),
+          rpc('listUserJobEvents').then(result => Array.isArray(result) ? result : []).catch(() => []),
+          rpc('getSchoogleSpreadsheetUrl').catch(() => ({ url: null }))
+        ]).then(([jobSummary, jobEvents, schoogle]) => {
+          updateJobUIsFromList(jobSummary, jobEvents, schoogle);
+          adjustPollingRate(jobSummary);
+        });
+      };
+      JOBS_POLL_TIMER = setInterval(poll, POLL_INTERVAL);
+      poll(); // Initial fetch
+    }
+
+    function adjustPollingRate(jobSummary) {
+      // Defensive check to ensure jobSummary is an array
+      if (!jobSummary || !Array.isArray(jobSummary)) {
+        console.warn('adjustPollingRate called with invalid jobSummary:', jobSummary);
+        jobSummary = [];
+      }
+      
+      const activeJobs = jobSummary.filter(job => job.status === 'queued' || job.status === 'running');
+      const newInterval = activeJobs.length > 0 ? ACTIVE_POLL_INTERVAL : IDLE_POLL_INTERVAL;
+      
+      if (newInterval !== POLL_INTERVAL) {
+        console.log('Adjusting poll rate from ' + POLL_INTERVAL + 'ms to ' + newInterval + 'ms (' + activeJobs.length + ' active jobs)');
+        POLL_INTERVAL = newInterval;
+        
+        // Restart polling with new interval
+        if (JOBS_POLL_TIMER) {
+          clearInterval(JOBS_POLL_TIMER);
+          JOBS_POLL_TIMER = setInterval(() => {
+            Promise.all([
+              rpc('listUserJobs').then(result => Array.isArray(result) ? result : []).catch(() => []),
+              rpc('listUserJobEvents').then(result => Array.isArray(result) ? result : []).catch(() => []),
+              rpc('getSchoogleSpreadsheetUrl').catch(() => ({ url: null }))
+            ]).then(([jobSummary, jobEvents, schoogle]) => {
+              updateJobUIsFromList(jobSummary, jobEvents, schoogle);
+              adjustPollingRate(jobSummary);
+            });
+          }, POLL_INTERVAL);
+        }
+      }
+    }
+    
+    function summarize(val, path = '') {
     try {
       if (val == null) return val;
       if (typeof val === 'string') return val.length > 500 ? val.slice(0, 500) + '…' : val;
@@ -35,8 +332,8 @@
     // When RPC_DEBUG is true, log full request bodies; otherwise use summarized output.
     try {
       const reqLog = (window && window.RPC_DEBUG) ? args : summarize(args);
-      console.log(`[RPC:${name}#${id}] Request`, reqLog);
-    } catch (e) { console.log(`[RPC:${name}#${id}] Request (unserializable)`, args); }
+      console.log('[RPC:' + name + '#' + id + '] Request', reqLog);
+    } catch (e) { console.log('[RPC:' + name + '#' + id + '] Request (unserializable)', args); }
     return new Promise((resolve, reject) => {
       try {
         google.script.run
@@ -44,20 +341,20 @@
             const dur = Math.round(((window.performance && performance.now ? performance.now() : Date.now()) - start));
             try {
               const resLog = (window && window.RPC_DEBUG) ? result : summarize(result);
-              console.log(`[RPC:${name}#${id}] Success in ${dur}ms`, resLog);
-            } catch (e) { console.log(`[RPC:${name}#${id}] Success in ${dur}ms (unserializable)`, result); }
+              console.log('[RPC:' + name + '#' + id + '] Success in ' + dur + 'ms', resLog);
+            } catch (e) { console.log('[RPC:' + name + '#' + id + '] Success in ' + dur + 'ms (unserializable)', result); }
             resolve(result);
           })
           .withFailureHandler(err => {
             const dur = Math.round(((window.performance && performance.now ? performance.now() : Date.now()) - start));
             try {
               const errLog = (window && window.RPC_DEBUG) ? err : summarize(err);
-              console.error(`[RPC:${name}#${id}] Failure in ${dur}ms`, errLog);
-            } catch (e) { console.error(`[RPC:${name}#${id}] Failure in ${dur}ms (unserializable)`, err); }
+              console.error('[RPC:' + name + '#' + id + '] Failure in ' + dur + 'ms', errLog);
+            } catch (e) { console.error('[RPC:' + name + '#' + id + '] Failure in ' + dur + 'ms (unserializable)', err); }
             reject(err);
           })[name](...args);
       } catch (err) {
-        console.error(`[RPC:${name}#${id}] Invocation error`, err);
+        console.error('[RPC:' + name + '#' + id + '] Invocation error', err);
         reject(err);
       }
     });
@@ -72,6 +369,14 @@
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabId));
     document.querySelectorAll('.tab-content').forEach(el => el.classList.toggle('active', el.id === tabId));
   console.debug('switchTab()', { tabId });
+    // If switching to Jobs, refresh once and start poller; otherwise stop list poller to save cycles
+    try {
+      if (tabId === 'jobsTab') {
+        startJobsPoller();
+      } else {
+        stopJobsPoller();
+      }
+    } catch (e) { /* ignore */ }
   }
 
   // Build a new form row
@@ -84,7 +389,7 @@
 
     // Populate period options
     const periodSelect = row.querySelector('.period-select');
-    periodSelect.innerHTML = '<option value="">Select Period</option>' + state.periods.map(p => `<option value="${p.id}">${p.text}</option>`).join('');
+    periodSelect.innerHTML = '<option value="">Select Period</option>' + state.periods.map(p => '<option value="' + p.id + '">' + p.text + '</option>').join('');
 
     if (prefill) {
       if (prefill.day) row.querySelector('.day-select').value = prefill.day;
@@ -198,8 +503,19 @@
       };
       out.push(item);
     }
-  const filtered = out.filter(x => x.day && x.periodId && x.title);
-  return filtered;
+    
+    // Debug logging to help identify missing data
+    const filtered = out.filter(x => x.day && x.periodId && x.title);
+    const rejected = out.filter(x => !x.day || !x.periodId || !x.title);
+    
+    if (rejected.length > 0) {
+      console.warn('collectFormData: Rejected rows with missing data:', rejected);
+      console.log('Available periods:', state.periods.map(p => ({ id: p.id, text: p.text })));
+    }
+    
+    console.debug('collectFormData:', { totalRows: out.length, validRows: filtered.length, rejectedRows: rejected.length });
+    
+    return filtered;
   }
 
   function groupByTitle(events) {
@@ -244,7 +560,7 @@
       const events = groups[title];
       const details = document.createElement('details');
       const summary = document.createElement('summary');
-      summary.textContent = `${title} (${events.length} events)`;
+      summary.textContent = title + ' (' + events.length + ' events)';
       details.appendChild(summary);
 
       const ul = document.createElement('ul');
@@ -349,7 +665,7 @@
   function updatePreviewMeta() {
     const meta = document.getElementById('previewMeta');
     const n = state.previewEvents.length;
-    meta.textContent = `Total events to create: ${n}. Estimated time ~ ${n}s.`;
+    meta.textContent = 'Total events to create: ' + n + '. Estimated time ~ ' + n + 's.';
   }
 
   function populateCalendars(selectEl, calendars) {
@@ -462,6 +778,8 @@
       showSpinner(true);
       rpc('generatePreviewEvents', { items: data, from, to })
         .then(evts => {
+          // Always re-enable Create Events button after preview
+          try { document.getElementById('createBtn').disabled = false; } catch (e) {}
           // Debug: log raw full payload (RPC_DEBUG will show full bodies; otherwise this still helps)
           console.log('Generated Events (raw):', evts);
 
@@ -499,19 +817,19 @@
                 if (!isNaN(sdt.getTime())) {
                   // yyyy-mm-dd and HH:MM (24h)
                   copy.startDate = sdt.toISOString().slice(0,10);
-                  copy.startTime = sdt.toTimeString().slice(0,5);
+                  copy.startTime = ('0' + sdt.getHours()).slice(-2) + ':' + ('0' + sdt.getMinutes()).slice(-2);
                 }
               }
-            } catch(e) {}
+            } catch(e) { console.warn('Error parsing startDateTime:', e); }
             try {
               if (copy.endDateTime) {
                 const edt = new Date(copy.endDateTime);
                 if (!isNaN(edt.getTime())) {
                   copy.endDate = edt.toISOString().slice(0,10);
-                  copy.endTime = edt.toTimeString().slice(0,5);
+                  copy.endTime = ('0' + edt.getHours()).slice(-2) + ':' + ('0' + edt.getMinutes()).slice(-2);
                 }
               }
-            } catch(e) {}
+            } catch(e) { console.warn('Error parsing endDateTime:', e); }
 
             return copy;
           });
@@ -529,6 +847,8 @@
         })
         .catch(err => {
           console.error('generatePreviewEvents failed', err);
+          // Also re-enable Create Events button on error
+          try { document.getElementById('createBtn').disabled = false; } catch (e) {}
         })
         .finally(() => showSpinner(false));
     });
@@ -561,12 +881,24 @@
           showSpinner(true);
           rpc('getTeacherTimetable', email)
             .then(rows => {
+              console.log('getTeacherTimetable response:', rows);
+              console.log('Available periods for comparison:', state.periods);
+              
               // clear existing non-template rows
               const container = document.getElementById('formRows');
               const existing = Array.from(container.querySelectorAll('.form-row')).filter(r => !r.dataset.template && !r.classList.contains('header'));
               existing.forEach(r => r.remove());
               // Prefill rows
-              (rows || []).forEach(r => addRow(r));
+              (rows || []).forEach((r, index) => {
+                console.log(`Adding row ${index}:`, r);
+                addRow(r);
+              });
+              
+              // Verify what was actually added to the form
+              setTimeout(() => {
+                const formData = collectFormData();
+                console.log('Form data after loading teacher timetable:', formData);
+              }, 100);
             })
             .catch(err => { console.error('getTeacherTimetable failed', err); alert('Failed to load timetable.'); })
             .finally(() => showSpinner(false));
@@ -584,8 +916,8 @@
       const createRunner = () => {
         const progress = document.getElementById('createProgress');
         progress.style.display = '';
-        progress.textContent = `Enqueuing job for ${state.previewEvents.length} events…`;
-        document.getElementById('createBtn').disabled = true;
+        progress.textContent = 'Enqueuing job for ' + state.previewEvents.length + ' events…';
+        try { document.getElementById('createBtn').disabled = true; } catch (e) {}
         showSpinner(true);
         // Prepare payload: compute startDateTime/endDateTime ISO strings from editable fields
         const payloadEvents = state.previewEvents.map(ev => {
@@ -608,21 +940,24 @@
             try { localStorage.setItem('schoogle_worker_installed','1'); } catch (e) {}
             try { updateWorkerStatus(true); } catch (e) {}
             // Now enqueue the job
-            progress.textContent = `Enqueuing job for ${payloadEvents.length} events…`;
+            progress.textContent = 'Enqueuing job for ' + payloadEvents.length + ' events…';
             return rpc('enqueueJob', payloadEvents, calendarId);
           })
           .then(jobId => {
             console.debug('Job enqueued', { jobId });
-            progress.textContent = `Job queued: ${jobId}. Polling for status…`;
-            // start polling
-            pollJobStatus(jobId, calendarId);
+            progress.textContent = 'Job queued: ' + jobId + '. Check Jobs tab for progress…';
             // Ensure jobs list poller starts so Jobs tab shows the queued job
-            try { ensureJobsPollerStarted(); } catch (e) { console.warn('ensureJobsPollerStarted failed', e); }
+            try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
+            // Fire-and-forget kickoff so processing starts ASAP, even if the timed trigger hasn't fired yet
+            try { setTimeout(() => { rpc('processUserJobs').catch(() => {}); }, 0); } catch (e) { /* ignore */ }
+            // Navigate user to the Jobs tab and refresh list so they see progress there
+            try { switchTab('jobsTab'); } catch (e) { /* ignore */ }
+            try { updateJobsUI(); } catch (e) { /* ignore */ }
           })
           .catch(err => {
             console.error('enqueueJob/ensureWorker failed', err);
             alert('Failed to install worker or enqueue job: ' + (err && err.message ? err.message : err));
-            document.getElementById('createBtn').disabled = false;
+            try { document.getElementById('createBtn').disabled = false; } catch (e) {}
           })
           .finally(() => showSpinner(false));
       };
@@ -642,130 +977,80 @@
       }
     });
 
-    // Polling helper: polls getJobStatus until done and updates UI
-    // Global job poller state so polling continues even if user switches tabs
-    const JOB_POLL = { activeJobs: {}, interval: 5000, timerId: null };
-
-    function pollJobStatus(jobId, calendarId) {
-      // register job in global activeJobs map
-      JOB_POLL.activeJobs[jobId] = { calendarId: calendarId };
-      ensureJobPollerRunning();
-    }
-
-    function ensureJobPollerRunning() {
-      if (JOB_POLL.timerId) return; // already running
-      JOB_POLL.timerId = setInterval(() => {
-        const jobIds = Object.keys(JOB_POLL.activeJobs);
-        if (!jobIds.length) { clearInterval(JOB_POLL.timerId); JOB_POLL.timerId = null; return; }
-        jobIds.forEach(jid => {
-          rpc('getJobStatus', jid)
-            .then(status => {
-              // update create progress UI if present
-              const progress = document.getElementById('createProgress');
-              if (status && progress) {
-                const s = status.status || 'unknown';
-                const done = (status.progress && status.progress.done) || 0;
-                const total = (status.progress && status.progress.total) || 0;
-                const est = (status.progress && status.progress.estSeconds) || null;
-                let estText = est ? ` ETA ~ ${Math.round(est/60)}m ${est%60}s` : '';
-                progress.textContent = `Job ${jid}: ${s} — ${done}/${total}` + (estText ? ' —' + estText : '');
-                // disable/enable create button while any running
-                if (s === 'running') document.getElementById('createBtn').disabled = true;
-                if (s === 'done' || s === 'error' || s === 'notfound') {
-                  delete JOB_POLL.activeJobs[jid];
-                  document.getElementById('createBtn').disabled = false;
-                  if (s === 'done' && status.reportUrl) {
-                    progress.textContent = `Done. Report: ${status.reportUrl}`;
-                    // Switch to View tab
-                    switchTab('viewTab');
-                    document.getElementById('viewCalendarSelect').value = JOB_POLL.activeJobs[jid] ? JOB_POLL.activeJobs[jid].calendarId : '';
-                    loadViewEvents(JOB_POLL.activeJobs[jid] ? JOB_POLL.activeJobs[jid].calendarId : '');
-                    // Clear Preview state and UI so user cannot accidentally re-run the same preview
-                    try {
-                      state.previewEvents = [];
-                      const previewContainer = document.getElementById('previewContainer');
-                      if (previewContainer) previewContainer.innerHTML = '';
-                      // re-enable create controls for adding new items
-                      document.getElementById('createBtn').disabled = false;
-                      // reset any preview input fields if present
-                      try { document.getElementById('fromDate').value = ''; } catch (e) {}
-                      try { document.getElementById('toDate').value = ''; } catch (e) {}
-                    } catch (e) { /* ignore UI errors */ }
-                  }
-                }
-                // Show open-spreadsheet button if spreadsheetUrl available
-                try {
-                  var linkContainer = document.getElementById('createProgressLink');
-                  if (!linkContainer) {
-                    linkContainer = document.createElement('span');
-                    linkContainer.id = 'createProgressLink';
-                    progress.parentNode && progress.parentNode.appendChild(linkContainer);
-                  }
-                  if (status && status.spreadsheetUrl) {
-                    linkContainer.innerHTML = '';
-                    var a = document.createElement('a');
-                    a.href = status.spreadsheetUrl;
-                    a.target = '_blank';
-                    a.textContent = 'Open spreadsheet';
-                    a.style.marginLeft = '8px';
-                    linkContainer.appendChild(a);
-                  } else if (linkContainer) {
-                    linkContainer.innerHTML = '';
-                  }
-                } catch (e) { /* ignore UI errors */ }
-              }
-            })
-            .catch(err => { console.error('getJobStatus failed', err); delete JOB_POLL.activeJobs[jid]; document.getElementById('createBtn').disabled = false; });
-        });
-      }, JOB_POLL.interval);
-    }
-
-    // Jobs list poller (separate): keeps the Jobs tab list refreshed only when there are jobs
-    let JOBS_LIST_TIMER = null;
-    function ensureJobsPollerStarted() {
-      if (JOBS_LIST_TIMER) return; // already running
-      // Fetch once and start interval only if there are jobs
-      renderJobsList().then(list => {
-        if (list && list.length) {
-          JOBS_LIST_TIMER = setInterval(renderJobsList, 5000);
-        }
-      }).catch(() => {});
-    }
-
+    // Unified job poller: polls listUserJobs and getSchoogleSpreadsheetUrl every 5s and updates all job-related UI
     function stopJobsPoller() {
-      if (JOBS_LIST_TIMER) { clearInterval(JOBS_LIST_TIMER); JOBS_LIST_TIMER = null; }
+      if (JOBS_POLL_TIMER) { clearInterval(JOBS_POLL_TIMER); JOBS_POLL_TIMER = null; }
     }
 
-    // Render jobs list and return the fetched list (promise) so callers can decide whether to poll
-    function renderJobsList() {
-      console.debug('renderJobsList tick', new Date().toISOString());
-      return rpc('listUserJobs')
-        .then(list => {
-          const container = document.getElementById('jobsList');
-          if (!container) return list || [];
-          container.innerHTML = '';
-          if (!list || !list.length) { container.textContent = 'No jobs found.'; stopJobsPoller(); return list || []; }
-          const queued = list.filter(j => j.status === 'queued' || j.status === 'running');
-          const done = list.filter(j => j.status === 'done' || j.status === 'error');
+    // Convenience function to refresh jobs UI manually
+    function updateJobsUI() {
+      return Promise.all([
+        rpc('listUserJobs').then(result => Array.isArray(result) ? result : []).catch(() => []),
+        rpc('listUserJobEvents').then(result => Array.isArray(result) ? result : []).catch(() => []),
+        rpc('getSchoogleSpreadsheetUrl').catch(() => ({ url: null }))
+      ]).then(([jobSummary, jobEvents, schoogle]) => {
+        updateJobUIsFromList(jobSummary, jobEvents, schoogle);
+      });
+    }
 
-          const qh = document.createElement('h4'); qh.textContent = 'Queued / Running'; container.appendChild(qh);
-          queued.forEach(j => {
-            const d = document.createElement('div'); d.className = 'job-row';
-            d.textContent = `${j.jobId} — ${j.status} — ${j.done}/${j.total}` + (j.startedAt ? ` started:${new Date(j.startedAt).toLocaleString()}` : '');
-            if (j.reportUrl) { const a = document.createElement('a'); a.href = j.reportUrl; a.target = '_blank'; a.textContent = ' Report'; d.appendChild(a); }
-            container.appendChild(d);
-          });
+    // Toggle completed jobs section
+    function toggleCompletedJobs() {
+      const list = document.getElementById('completedJobsList');
+      const toggle = document.getElementById('completedToggle');
+      if (list.style.display === 'none') {
+        list.style.display = 'block';
+        toggle.textContent = '▲';
+        toggle.classList.remove('collapsed');
+      } else {
+        list.style.display = 'none';
+        toggle.textContent = '▼';
+        toggle.classList.add('collapsed');
+      }
+    }
+    
+    // Make toggle function globally accessible
+    window.toggleCompletedJobs = toggleCompletedJobs;
 
-          const dh = document.createElement('h4'); dh.textContent = 'Completed / Errors'; container.appendChild(dh);
-          done.forEach(j => {
-            const d = document.createElement('div'); d.className = 'job-row';
-            d.textContent = `${j.jobId} — ${j.status} — ${j.createdCount} created` + (j.lastUpdated ? ` updated:${new Date(j.lastUpdated).toLocaleString()}` : '');
-            if (j.reportUrl) { const a = document.createElement('a'); a.href = j.reportUrl; a.target = '_blank'; a.textContent = ' Report'; d.appendChild(a); }
-            container.appendChild(d);
-          });
-          return list || [];
-        })
-        .catch(err => { console.error('listUserJobs failed', err); return []; });
+      // Update spreadsheet link in progress area if available
+      try {
+        var linkContainer = document.getElementById('createProgressLink');
+        if (!linkContainer) {
+          linkContainer = document.createElement('span');
+          linkContainer.id = 'createProgressLink';
+          progress && progress.parentNode && progress.parentNode.appendChild(linkContainer);
+        }
+        if (running && (running.spreadsheetUrl || JOBS_POLL_SCHOOGLE_URL)) {
+          linkContainer.innerHTML = '';
+          var a = document.createElement('a');
+          a.href = running.spreadsheetUrl || JOBS_POLL_SCHOOGLE_URL;
+          a.target = '_blank';
+          a.textContent = 'Open spreadsheet';
+          a.style.marginLeft = '8px';
+          linkContainer.appendChild(a);
+        } else if (linkContainer) {
+          linkContainer.innerHTML = '';
+        }
+      } catch (e) { /* ignore UI errors */ }
+      // If a job just finished, reset preview state
+      const justDone = JOBS_POLL_LAST.find(j => j.status === 'done' && !j._uiDone);
+      if (justDone) {
+        justDone._uiDone = true;
+        // Removed automatic tab switch to View tab
+        // Optionally reload events for the relevant calendar
+        if (justDone.calendarId) {
+          document.getElementById('viewCalendarSelect').value = justDone.calendarId;
+          loadViewEvents(justDone.calendarId);
+        }
+        // Clear Preview state and UI so user cannot accidentally re-run the same preview
+        try {
+          state.previewEvents = [];
+          const previewContainer = document.getElementById('previewContainer');
+          if (previewContainer) previewContainer.innerHTML = '';
+          try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+          try { document.getElementById('fromDate').value = ''; } catch (e) {}
+          try { document.getElementById('toDate').value = ''; } catch (e) {}
+        } catch (e) { /* ignore UI errors */ }
+      }
     }
 
     // Back to form from preview
@@ -814,17 +1099,13 @@
         if (data.defaultFrom) document.getElementById('fromDate').value = data.defaultFrom;
         if (data.defaultTo) document.getElementById('toDate').value = data.defaultTo;
         loadCalendars();
+        // Start job polling
+        try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
       })
       .catch(err => {
         console.error('getInitialData failed', err);
       })
       .finally(() => showSpinner(false));
-  // Wire manual refresh button for Jobs tab (don't poll constantly if no jobs)
-  try {
-    const rb = document.getElementById('refreshJobsBtn');
-    if (rb) rb.addEventListener('click', () => { showSpinner(true); renderJobsList().finally(()=>showSpinner(false)); });
-  } catch (e) { console.warn('refreshJobsBtn wiring failed', e); }
-  }
 
   function renderViewEvents(events) {
     const list = document.getElementById('viewList');
@@ -835,7 +1116,7 @@
     titles.forEach(title => {
       const details = document.createElement('details');
       const summary = document.createElement('summary');
-      summary.textContent = `${title} (${groups[title].length})`;
+      summary.textContent = title + ' (' + groups[title].length + ')';
       // Add a delete-all button at the group level
       const deleteAllBtn = document.createElement('button');
       deleteAllBtn.className = 'btn danger mini';
@@ -866,7 +1147,7 @@
             matches.forEach(ev => {
               const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
               const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.eid = ev.id;
-              const txt = document.createElement('span'); txt.textContent = `${ev.title} — ${fmt(ev.start)} → ${fmt(ev.end)} ${ev.location ? '(' + ev.location + ')' : ''}`;
+              const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + fmt(ev.start) + ' → ' + fmt(ev.end) + (ev.location ? ' (' + ev.location + ')' : '');
               li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
             });
             box.appendChild(ul);
@@ -904,7 +1185,7 @@
 
         const timeSpan = document.createElement('span');
         timeSpan.className = 'event-time';
-        timeSpan.textContent = `${fmt(ev.start)} → ${fmt(ev.end)}`;
+        timeSpan.textContent = fmt(ev.start) + ' → ' + fmt(ev.end);
 
         const openLink = document.createElement('a');
         openLink.href = ev.htmlLink; openLink.target = '_blank';
@@ -962,6 +1243,24 @@
       })
       .catch(err => console.error('getEventsFromCalendar failed', err))
       .finally(() => showSpinner(false));
+  }
+
+  // Test function to verify server functions return arrays (can be removed after testing)
+  function testServerFunctions() {
+    console.log('Testing server functions...');
+    rpc('listUserJobs')
+      .then(result => {
+        console.log('listUserJobs result:', result, 'Is array:', Array.isArray(result), 'Type:', typeof result);
+        if (result === null) console.warn('listUserJobs returned null!');
+      })
+      .catch(err => console.error('listUserJobs failed:', err));
+    
+    rpc('listUserJobEvents')
+      .then(result => {
+        console.log('listUserJobEvents result:', result, 'Is array:', Array.isArray(result), 'Type:', typeof result);
+        if (result === null) console.warn('listUserJobEvents returned null!');
+      })
+      .catch(err => console.error('listUserJobEvents failed:', err));
   }
 
   window.addEventListener('load', init);
