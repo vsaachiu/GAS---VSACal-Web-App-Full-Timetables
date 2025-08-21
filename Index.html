@@ -72,6 +72,12 @@
                 <select id="otherTeacherSelect" style="min-width:320px;"></select>
                 <button id="loadOtherBtn" class="btn mini" style="margin-left:8px;">Load other timetable</button>
               </div>
+              
+              <button id="showLoadClassesBtn" class="btn mini" style="margin-left:8px;">Load other classes</button>
+              <div id="classLoadWrap" style="display:none; margin-top:8px;">
+                <select id="classSelect" style="min-width:320px;"></select>
+                <button id="loadClassBtn" class="btn mini" style="margin-left:8px;">Load other classes</button>
+              </div>
             </div>
           </div>
 
@@ -110,7 +116,10 @@
 
           <!-- Queued Jobs Section -->
           <div class="jobs-section">
-            <h3>📋 Queued Jobs <span id="queuedCount" class="count-badge">0</span></h3>
+            <h3 class="collapsible-header" onclick="toggleQueuedJobs()">
+              📋 Queued Jobs <span id="queuedCount" class="count-badge">0</span>
+              <span id="queuedToggle" class="toggle-icon">▼</span>
+            </h3>
             <div id="queuedJobsList" class="jobs-list">
               <div class="no-jobs">No jobs queued</div>
             </div>
@@ -118,7 +127,10 @@
 
           <!-- Running Jobs Section -->
           <div class="jobs-section">
-            <h3>⚡ Running Jobs <span id="runningCount" class="count-badge">0</span></h3>
+            <h3 class="collapsible-header" onclick="toggleRunningJobs()">
+              ⚡ Running Jobs <span id="runningCount" class="count-badge">0</span>
+              <span id="runningToggle" class="toggle-icon">▼</span>
+            </h3>
             <div id="runningJobsList" class="jobs-list">
               <div class="no-jobs">No jobs running</div>
             </div>
@@ -141,6 +153,19 @@
     <div id="spinner" class="spinner-overlay" style="display:none;">
       <div class="spinner"></div>
       <div class="spinner-text">Working…</div>
+    </div>
+
+    <!-- Load Timetable Confirmation Modal -->
+    <div id="loadConfirmModal" class="modal-overlay" style="display:none;">
+      <div class="modal-box">
+        <h3 id="loadConfirmTitle">Load Timetable</h3>
+        <p id="loadConfirmMessage">What would you like to do with the timetable?</p>
+        <div class="modal-actions">
+          <button id="loadConfirmReplace" class="btn primary">Replace Current</button>
+          <button id="loadConfirmAdd" class="btn">Add to Current</button>
+          <button id="loadConfirmCancel" class="btn">Cancel</button>
+        </div>
+      </div>
     </div>
 
     <?!= include('JavaScript'); ?>

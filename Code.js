@@ -157,6 +157,29 @@ function getTeachers() {
   return out;
 }
 
+// Get all unique classes from TIMETABLE_MASTER sheet (column D)
+function getClasses() {
+  var ss = SpreadsheetApp.getActive();
+  var ttSheet = ss.getSheetByName('TIMETABLE_MASTER');
+  var out = [];
+  if (!ttSheet) return out;
+  var vals = ttSheet.getDataRange().getValues();
+  var seen = {};
+  for (var i = 1; i < vals.length; i++) {
+    var row = vals[i];
+    var className = (row[3] || '').toString().trim(); // Column D (index 3)
+    if (!className) continue;
+    if (seen[className]) continue;
+    // Skip classes that start with "Duty" or "MSMEET"
+    if (className.toLowerCase().startsWith('duty') || className.toLowerCase().startsWith('msmeet')) continue;
+    seen[className] = true;
+    out.push(className);
+  }
+  // Sort alphabetically
+  out.sort(function(a, b) { return a.localeCompare(b); });
+  return out;
+}
+
 // Return timetable rows for a given teacher email
 function getTeacherTimetable(teacherEmail) {
   var out = [];
@@ -169,6 +192,23 @@ function getTeacherTimetable(teacherEmail) {
     var row = vals[i];
     var email = (row[0] || '').toString().trim();
     if (!email || email.toLowerCase() !== teacherEmail.toLowerCase()) continue;
+    out.push({ day: (row[4] || '').toString().trim(), periodId: (row[2] || '').toString().trim(), title: (row[3] || '').toString().trim(), location: (row[6] || '').toString().trim() });
+  }
+  return out;
+}
+
+// Return timetable rows for a given class name
+function getClassTimetable(className) {
+  var out = [];
+  if (!className) return out;
+  var ss = SpreadsheetApp.getActive();
+  var ttSheet = ss.getSheetByName('TIMETABLE_MASTER');
+  if (!ttSheet) return out;
+  var vals = ttSheet.getDataRange().getValues();
+  for (var i = 1; i < vals.length; i++) {
+    var row = vals[i];
+    var title = (row[3] || '').toString().trim(); // Column D (index 3)
+    if (!title || title.toLowerCase() !== className.toLowerCase()) continue;
     out.push({ day: (row[4] || '').toString().trim(), periodId: (row[2] || '').toString().trim(), title: (row[3] || '').toString().trim(), location: (row[6] || '').toString().trim() });
   }
   return out;

@@ -28,12 +28,19 @@
     const item = document.createElement('div');
     item.className = 'job-item';
     
-    const title = document.createElement('div');
-    title.className = 'job-title';
-    title.textContent = event.title || 'Untitled Event';
+    // Create the main title container (will hold title + metadata + button on same line)
+    const titleContainer = document.createElement('div');
+    titleContainer.className = 'job-title';
     
-    const details = document.createElement('div');
-    details.className = 'job-details';
+    // Create the title text element
+    const titleText = document.createElement('span');
+    titleText.className = 'job-title-text';
+    titleText.textContent = event.title || 'Untitled Event';
+    titleText.title = event.title || 'Untitled Event'; // Tooltip for full title
+    
+    // Create the metadata container for date and location
+    const metaContainer = document.createElement('span');
+    metaContainer.className = 'job-title-meta';
     
     // Format start date/time
     let dateStr = 'No date';
@@ -46,22 +53,19 @@
       }
     } catch (e) { /* ignore */ }
     
-    // Get calendar name (simplified)
-    const calName = event.calendarId === 'primary' ? 'Primary Calendar' : (event.calendarId || 'Unknown Calendar');
-    
+    // Create inline metadata: date/time and location
     const metaElements = [
       '📅 ' + dateStr + ' ' + timeStr,
-      '📍 ' + (event.location || 'No location'),
-      '📋 ' + calName
+      '📍 ' + (event.location || 'No location')
     ];
     
-    if (event.status === 'error' && event.error) {
-      metaElements.push('❌ ' + event.error);
-    }
+    metaContainer.innerHTML = metaElements.map(meta => '<span class="job-meta">' + meta + '</span>').join('');
     
-    details.innerHTML = metaElements.map(meta => '<span class="job-meta">' + meta + '</span>').join('');
+    // Add title and metadata to title container
+    titleContainer.appendChild(titleText);
+    titleContainer.appendChild(metaContainer);
     
-    // Add calendar link for completed events
+    // Add calendar link for completed events (on the same line)
     if (event.status === 'done' && event.createdEventId) {
       const calendarLink = document.createElement('button');
       calendarLink.className = 'btn mini calendar-link';
@@ -71,15 +75,16 @@
         const calUrl = 'https://calendar.google.com/calendar/u/0/r/eventedit/' + event.createdEventId;
         window.open(calUrl, '_blank');
       };
-      
-      const linkContainer = document.createElement('div');
-      linkContainer.style.marginTop = '8px';
-      linkContainer.appendChild(calendarLink);
-      item.appendChild(title);
-      item.appendChild(details);
-      item.appendChild(linkContainer);
-    } else {
-      item.appendChild(title);
+      titleContainer.appendChild(calendarLink);
+    }
+    
+    item.appendChild(titleContainer);
+    
+    // Only add details section if there are errors to show
+    if (event.status === 'error' && event.error) {
+      const details = document.createElement('div');
+      details.className = 'job-details';
+      details.innerHTML = '<span class="job-meta">❌ ' + event.error + '</span>';
       item.appendChild(details);
     }
     
@@ -861,9 +866,10 @@
       const loadBtn = document.getElementById('loadOtherBtn');
       if (showBtn && wrap && select && loadBtn) {
         showBtn.addEventListener('click', () => {
-          // toggle visibility
-          wrap.style.display = (wrap.style.display === 'none' || !wrap.style.display) ? '' : 'none';
-          if (wrap.style.display !== 'none' && !select.options.length) {
+          // Hide the button and show the dropdown
+          showBtn.style.display = 'none';
+          wrap.style.display = '';
+          if (!select.options.length) {
             showSpinner(true);
             rpc('getTeachers').then(list => {
               // populate select alphabetically (server already sorts)
@@ -877,34 +883,45 @@
         loadBtn.addEventListener('click', () => {
           const email = (select.value || '').toString().trim();
           if (!email) { alert('Select a teacher to load.'); return; }
-          if (!confirm('Replace current prefilled rows with timetable for ' + (select.options[select.selectedIndex].text || email) + '?')) return;
-          showSpinner(true);
-          rpc('getTeacherTimetable', email)
-            .then(rows => {
-              console.log('getTeacherTimetable response:', rows);
-              console.log('Available periods for comparison:', state.periods);
-              
-              // clear existing non-template rows
-              const container = document.getElementById('formRows');
-              const existing = Array.from(container.querySelectorAll('.form-row')).filter(r => !r.dataset.template && !r.classList.contains('header'));
-              existing.forEach(r => r.remove());
-              // Prefill rows
-              (rows || []).forEach((r, index) => {
-                console.log(`Adding row ${index}:`, r);
-                addRow(r);
-              });
-              
-              // Verify what was actually added to the form
-              setTimeout(() => {
-                const formData = collectFormData();
-                console.log('Form data after loading teacher timetable:', formData);
-              }, 100);
-            })
-            .catch(err => { console.error('getTeacherTimetable failed', err); alert('Failed to load timetable.'); })
-            .finally(() => showSpinner(false));
+          const teacherName = select.options[select.selectedIndex].text || email;
+          showLoadConfirmModal('Load Teacher Timetable', 'Load timetable for ' + teacherName + '?', () => {
+            return rpc('getTeacherTimetable', email);
+          });
         });
       }
     } catch (e) { console.warn('other teacher UI wiring failed', e); }
+
+    // Load other classes UI
+    try {
+      const showClassBtn = document.getElementById('showLoadClassesBtn');
+      const classWrap = document.getElementById('classLoadWrap');
+      const classSelect = document.getElementById('classSelect');
+      const loadClassBtn = document.getElementById('loadClassBtn');
+      if (showClassBtn && classWrap && classSelect && loadClassBtn) {
+        showClassBtn.addEventListener('click', () => {
+          // Hide the button and show the dropdown
+          showClassBtn.style.display = 'none';
+          classWrap.style.display = '';
+          if (!classSelect.options.length) {
+            showSpinner(true);
+            rpc('getClasses').then(list => {
+              // populate select alphabetically (server already sorts)
+              classSelect.innerHTML = '';
+              const opt = document.createElement('option'); opt.value = ''; opt.textContent = '-- Select class --'; classSelect.appendChild(opt);
+              (list || []).forEach(className => { const o = document.createElement('option'); o.value = className; o.textContent = className; classSelect.appendChild(o); });
+            }).catch(err => { console.error('getClasses failed', err); alert('Failed to load classes.'); }).finally(()=>showSpinner(false));
+          }
+        });
+
+        loadClassBtn.addEventListener('click', () => {
+          const className = (classSelect.value || '').toString().trim();
+          if (!className) { alert('Select a class to load.'); return; }
+          showLoadConfirmModal('Load Class Timetable', 'Load timetable for ' + className + '?', () => {
+            return rpc('getClassTimetable', className);
+          });
+        });
+      }
+    } catch (e) { console.warn('class UI wiring failed', e); }
 
     // Create
     document.getElementById('createBtn').addEventListener('click', () => {
@@ -1007,9 +1024,39 @@
         toggle.classList.add('collapsed');
       }
     }
+
+    function toggleQueuedJobs() {
+      const list = document.getElementById('queuedJobsList');
+      const toggle = document.getElementById('queuedToggle');
+      if (list.style.display === 'none') {
+        list.style.display = 'block';
+        toggle.textContent = '▼';
+        toggle.classList.remove('collapsed');
+      } else {
+        list.style.display = 'none';
+        toggle.textContent = '▲';
+        toggle.classList.add('collapsed');
+      }
+    }
+
+    function toggleRunningJobs() {
+      const list = document.getElementById('runningJobsList');
+      const toggle = document.getElementById('runningToggle');
+      if (list.style.display === 'none') {
+        list.style.display = 'block';
+        toggle.textContent = '▼';
+        toggle.classList.remove('collapsed');
+      } else {
+        list.style.display = 'none';
+        toggle.textContent = '▲';
+        toggle.classList.add('collapsed');
+      }
+    }
     
-    // Make toggle function globally accessible
+    // Make toggle functions globally accessible
     window.toggleCompletedJobs = toggleCompletedJobs;
+    window.toggleQueuedJobs = toggleQueuedJobs;
+    window.toggleRunningJobs = toggleRunningJobs;
 
       // Update spreadsheet link in progress area if available
       try {
@@ -1261,6 +1308,73 @@
         if (result === null) console.warn('listUserJobEvents returned null!');
       })
       .catch(err => console.error('listUserJobEvents failed:', err));
+  }
+
+  // Show load confirmation modal
+  function showLoadConfirmModal(title, message, dataFetcher) {
+    const modal = document.getElementById('loadConfirmModal');
+    const titleEl = document.getElementById('loadConfirmTitle');
+    const messageEl = document.getElementById('loadConfirmMessage');
+    const replaceBtn = document.getElementById('loadConfirmReplace');
+    const addBtn = document.getElementById('loadConfirmAdd');
+    const cancelBtn = document.getElementById('loadConfirmCancel');
+
+    titleEl.textContent = title;
+    messageEl.textContent = message;
+    modal.style.display = '';
+
+    // Remove existing event listeners
+    const newReplaceBtn = replaceBtn.cloneNode(true);
+    const newAddBtn = addBtn.cloneNode(true);
+    const newCancelBtn = cancelBtn.cloneNode(true);
+    replaceBtn.parentNode.replaceChild(newReplaceBtn, replaceBtn);
+    addBtn.parentNode.replaceChild(newAddBtn, addBtn);
+    cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
+
+    function hideModal() {
+      modal.style.display = 'none';
+    }
+
+    function loadData(shouldReplace) {
+      hideModal();
+      showSpinner(true);
+      dataFetcher()
+        .then(rows => {
+          console.log('Timetable data response:', rows);
+          console.log('Available periods for comparison:', state.periods);
+          
+          const container = document.getElementById('formRows');
+          
+          if (shouldReplace) {
+            // clear existing non-template rows
+            const existing = Array.from(container.querySelectorAll('.form-row')).filter(r => !r.dataset.template && !r.classList.contains('header'));
+            existing.forEach(r => r.remove());
+          }
+          
+          // Add rows
+          (rows || []).forEach((r, index) => {
+            console.log(`Adding row ${index}:`, r);
+            addRow(r);
+          });
+          
+          // Verify what was actually added to the form
+          setTimeout(() => {
+            const formData = collectFormData();
+            console.log('Form data after loading timetable:', formData);
+          }, 100);
+        })
+        .catch(err => { console.error('Loading timetable failed', err); alert('Failed to load timetable.'); })
+        .finally(() => showSpinner(false));
+    }
+
+    newReplaceBtn.addEventListener('click', () => loadData(true));
+    newAddBtn.addEventListener('click', () => loadData(false));
+    newCancelBtn.addEventListener('click', hideModal);
+
+    // Close modal when clicking outside
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) hideModal();
+    });
   }
 
   window.addEventListener('load', init);
