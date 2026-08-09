@@ -1,7 +1,7 @@
 <style>
 :root {
-  --bg: #ffffff;
-  --panel: #ffffff;
+  --bg: #fff6ea;
+  --panel: rgba(255, 255, 255, 0.88);
   --text: #1f2937;
   --muted: #5b6472;
   --primary: #004c80;
@@ -9,16 +9,16 @@
   --danger: #88002b;
   --danger-soft: #fff1f5;
   --border: #e9ecef;
-  --surface: #f8fafc;
-  --warm-accent: #ff5a36;
+  --surface: #fff9f1;
+  --warm-accent: #ff7a45;
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: Helvetica, "Heiti TC", "PingFang TC", Arial, sans-serif; }
+html, body { margin: 0; padding: 0; background: linear-gradient(180deg, #fff4e4 0%, #fff8ef 42%, #fffdfb 100%); color: var(--text); font-family: Helvetica, "Heiti TC", "PingFang TC", Arial, sans-serif; }
 
 .container { max-width: 1000px; margin: 0 auto; padding: 24px; }
 header h1 { margin: 0; font-size: 30px; color: var(--primary); }
-header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
+header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--success); }
 
 .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
 .tab-btn { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; cursor: pointer; }
@@ -29,7 +29,7 @@ header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
 
 .flow-stepper {
   display: grid;
-  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -42,6 +42,7 @@ header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
   background: var(--surface);
   border-radius: 8px;
   padding: 8px 10px;
+  min-height: 50px;
 }
 
 .step-number {
@@ -56,10 +57,10 @@ header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
   font-weight: 700;
 }
 
-.step-text { font-size: 12px; color: var(--muted); }
-.step.active { border-color: var(--primary); background: #edf5fb; }
-.step.active .step-number { background: var(--primary); color: #fff; border-color: var(--primary); }
-.step.active .step-text { color: var(--primary); font-weight: 600; }
+.step-text { font-size: 12px; color: #6b5f57; line-height: 1.25; }
+.step.active { border-color: var(--warm-accent); background: #fff0e2; }
+.step.active .step-number { background: var(--warm-accent); color: #fff; border-color: var(--warm-accent); }
+.step.active .step-text { color: #a84b1d; font-weight: 700; }
 .step.done { border-color: var(--success); }
 .step.done .step-number { background: var(--success); color: #fff; border-color: var(--success); }
 
@@ -237,7 +238,7 @@ header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
 /* Limit calendar select width so it doesn't stretch the layout */
 .calendar-picker select { max-width: 360px; min-width: 220px; }
 
-.spinner-overlay { position: fixed; inset: 0; background: rgba(255,255,255,0.7); display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; z-index: 9999; }
+.spinner-overlay { position: fixed; inset: 0; background: rgba(255,244,228,0.72); display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; z-index: 9999; }
 .spinner { width: 36px; height: 36px; border: 3px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; }
 .spinner-text { color: var(--muted); }
 
@@ -246,7 +247,7 @@ header h2 { margin: 6px 0 20px; font-weight: 400; color: var(--muted); }
 /* Modal styles matching site dark theme */
 .schoogle-modal-overlay {
   position: fixed; left: 0; top: 0; right: 0; bottom: 0;
-  background: rgba(0,76,128,0.2); display: flex; align-items: flex-start; justify-content: center; padding-top: 48px; z-index: 9999;
+  background: rgba(255, 122, 69, 0.16); display: flex; align-items: flex-start; justify-content: center; padding-top: 48px; z-index: 9999;
 }
 .schoogle-modal-box {
   background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 16px; max-width: 720px; width: calc(100% - 48px); max-height: 70vh; overflow: auto;

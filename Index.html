@@ -20,19 +20,25 @@
       </nav>
 
       <main>
+          <div class="onboarding-panel">
+            <h3 id="welcomeHeading">Hello!</h3>
+            <p class="section-instructions">This mini app helps to add / sync classes and duties to your Google Calendar.</p>
+            <p class="section-instructions">Start by entering a date window to work with and choose one of your Google Calendars, or create a new one. Then you can load classes and duties you want to add to that calendar. You can preview events before creating them in Google Calendar. If you have existing events already created by this system on your Google Calendar, you can edit, delete or re-sync them!</p>
+            <div id="addStatusMessage" class="status-message" style="display:none;"></div>
+          </div>
         <section id="addTab" class="tab-content active">
           <div class="flow-stepper" id="addStepper">
             <div class="step active" data-step="1">
               <span class="step-number">1</span>
-              <span class="step-text">Choose date window</span>
+              <span class="step-text">Choose dates, calendar and timetable events</span>
             </div>
             <div class="step" data-step="2">
               <span class="step-number">2</span>
-              <span class="step-text">Choose calendar</span>
+              <span class="step-text">Preview</span>
             </div>
             <div class="step" data-step="3">
               <span class="step-number">3</span>
-              <span class="step-text">Preview and apply</span>
+              <span class="step-text">Create events</span>
             </div>
           </div>
 
@@ -51,23 +57,24 @@
           </div>
 
           <div class="onboarding-panel">
-            <h3>Step 2: Existing Schoogle Events</h3>
+            <h3>Step 1: Google Calendar</h3>
             <div class="calendar-picker">
               <label for="viewCalendarSelect">Calendar</label>
               <select id="viewCalendarSelect"></select>
+            </div>
+            <div class="calendar-picker">
+              <label for="newCalendarName">New calendar name</label>
+              <input id="newCalendarName" type="text" placeholder="New calendar name" style="display:none;" />
             </div>
             <div id="existingEventsHeader" class="section-heading">Existing Schoogle Events on (no calendar selected)</div>
             <div id="viewList" class="collapsible-list"></div>
           </div>
 
-          <div class="onboarding-panel">
-            <h3 id="welcomeHeading">Hello!</h3>
-            <p class="section-instructions">Start by loading a timetable source, then preview events before creating them in Google Calendar.</p>
-            <div id="addStatusMessage" class="status-message" style="display:none;"></div>
-          </div>
 
+        <div class="onboarding-panel">
+          <h3>Step 3: Timetable Events to add</h3>
           <div id="formSection">
-            <div class="section-instructions">Step 1: Load timetable rows (or enter rows manually). Step 2: Choose date window and preview events.</div>
+            <div class="section-instructions">Load timetable rows (or enter rows manually). These are the events you want to add to your calendar based on the Day cycle.</div>
             <div class="source-grid source-card-grid">
               <button id="loadMyTimetableBtn" type="button" class="source-card btn primary">My timetable</button>
               <div class="source-item source-card-wrap">
@@ -139,21 +146,12 @@
               <button id="previewBtn" class="btn primary">Preview Events</button>
             </div>
           </div>
+        </div>
 
           <div id="previewSection" style="display:none;">
-            <div class="section-instructions">Step 2: Review generated events and edit if needed. Step 3: Select target calendar and create events.</div>
+            <div class="section-instructions">Step 2: Review generated events and edit if needed. Step 3: Create events.</div>
             <div id="previewMeta" class="preview-meta"></div>
             <div id="previewList" class="collapsible-list"></div>
-            <div class="calendar-picker preview-calendar-picker">
-              <label for="calendarSelect">Target calendar</label>
-              <select id="calendarSelect"></select>
-              <input id="newCalendarName" type="text" placeholder="New calendar name" style="display:none;" />
-            </div>
-            <details class="helper-card">
-              <summary>How to create a new calendar</summary>
-              <p>Select "+ Create new calendar..." from Target calendar, enter a name, then click Create Events. Schoogle will create the calendar first, then queue events into it.</p>
-              <p>When done, you will see confirmation in this tab and job progress in Active Jobs.</p>
-            </details>
             <div class="controls">
               <button id="backToFormBtn" class="btn">Back to form</button>
               <button id="createBtn" class="btn success">Create Events</button>
@@ -332,7 +330,7 @@
       </div>
     </div>
 
-    <footer class="site-footer">Made with love by achiu@vsa.edu.hk / Tech Innovation Department</footer>
+    <footer class="site-footer">Vibe coded with love by achiu@vsa.edu.hk / VSA Tech Innovation (Secondary) Department</footer>
 
     <?!= include('JavaScript'); ?>
   </body>

@@ -1341,8 +1341,8 @@
         inviteInput.style.padding = '8px';
         inviteInput.style.border = '1px solid var(--border)';
         inviteInput.style.borderRadius = '4px';
-        inviteInput.style.background = '#0f1525';
-        inviteInput.style.color = 'var(--text)';
+        inviteInput.style.background = '#ffffff';
+        inviteInput.style.color = '#111111';
         inviteInput.style.fontFamily = 'inherit';
         inviteInput.style.fontSize = '14px';
         inviteInput.style.resize = 'vertical';
@@ -1547,8 +1547,8 @@
         inviteInput.style.padding = '4px 8px';
         inviteInput.style.border = '1px solid var(--border)';
         inviteInput.style.borderRadius = '4px';
-        inviteInput.style.background = '#0f1525';
-        inviteInput.style.color = 'var(--text)';
+        inviteInput.style.background = '#ffffff';
+        inviteInput.style.color = '#111111';
         inviteInput.style.fontSize = '12px';
         inviteInput.placeholder = 'user1@example.com, user2@example.com';
         inviteInput.value = ev.inviteEmails ? (Array.isArray(ev.inviteEmails) ? ev.inviteEmails.join(', ') : ev.inviteEmails) : '';
@@ -1643,11 +1643,16 @@
 
   function loadCalendars() {
     showSpinner(true);
+    const viewSelect = document.getElementById('viewCalendarSelect');
+    const selectedValue = viewSelect ? viewSelect.value : '';
     rpc('getCalendarList')
       .then(cals => {
         state.calendars = cals || [];
-        populateCalendars(document.getElementById('calendarSelect'), state.calendars);
-        populateCalendars(document.getElementById('viewCalendarSelect'), state.calendars);
+        populateCalendars(viewSelect, state.calendars);
+        if (viewSelect && selectedValue) {
+          const hasSelected = Array.from(viewSelect.options).some(opt => opt.value === selectedValue);
+          if (hasSelected) viewSelect.value = selectedValue;
+        }
         // Populate Update tab calendar select (without "Create new" option)
         var _updateCalSel = document.getElementById('updateCalendarSelect');
         if (_updateCalSel) {
@@ -1838,7 +1843,7 @@
           console.debug('generatePreviewEvents -> success', { count: state.previewEvents.length, sample: state.previewEvents.slice(0,5) });
           document.getElementById('formSection').style.display = 'none';
           document.getElementById('previewSection').style.display = '';
-          setStepperProgress('addStepper', 3);
+          setStepperProgress('addStepper', 2);
           showInlineStatus('addStatusMessage', '', '');
           updatePreviewMeta();
           renderPreview();
@@ -1949,7 +1954,7 @@
       // === END DEBUG ===
       
       if (!state.previewEvents.length) { showInlineStatus('addStatusMessage', 'No preview events available. Click Preview Events first.', 'warning'); return; }
-      const calSel = document.getElementById('calendarSelect');
+      const calSel = document.getElementById('viewCalendarSelect');
       let calendarId = calSel.value;
       const newNameEl = document.getElementById('newCalendarName');
 
@@ -2077,6 +2082,7 @@
         rpc('createNewCalendar', name)
           .then(id => {
             calendarId = id;
+            try { calSel.value = id; } catch (e) {}
             showInlineStatus('addStatusMessage', 'Calendar created. Queueing events next.', 'success');
             loadCalendars();
             createRunner();
@@ -2206,30 +2212,12 @@
   console.debug('Back to form clicked');
     });
 
-    // New calendar select behavior
-    document.getElementById('calendarSelect').addEventListener('change', (e) => {
-      const val = e.target.value;
-      document.getElementById('newCalendarName').style.display = (val === '__new__') ? '' : 'none';
-      if (val && val !== '__new__') {
-        const viewSel = document.getElementById('viewCalendarSelect');
-        if (viewSel) {
-          viewSel.value = val;
-          updateExistingEventsHeader();
-          loadViewEvents(val);
-        }
-      }
-    });
-
-    // View tab calendar select
+    // Step 1 calendar select
     document.getElementById('viewCalendarSelect').addEventListener('change', (e) => {
       const id = e.target.value;
       updateExistingEventsHeader();
-      setStepperProgress('addStepper', id ? 2 : 1);
-      try {
-        const targetSel = document.getElementById('calendarSelect');
-        if (targetSel) targetSel.value = id;
-      } catch (err) { /* ignore */ }
-      if (id) loadViewEvents(id);
+      document.getElementById('newCalendarName').style.display = (id === '__new__') ? '' : 'none';
+      if (id && id !== '__new__') loadViewEvents(id);
     });
 
     // Initial data load
@@ -2271,12 +2259,15 @@
 
   function renderViewEvents(events) {
     const list = document.getElementById('viewList');
+    const openTitles = new Set(Array.from(list.querySelectorAll('details[open]')).map(d => (d.dataset.groupTitle || '').trim()).filter(Boolean));
     list.innerHTML = '';
     const groups = groupByTitle(events);
     const titles = Object.keys(groups).sort();
 
     titles.forEach(title => {
       const details = document.createElement('details');
+      details.dataset.groupTitle = title;
+      if (openTitles.has(title)) details.open = true;
       const summary = document.createElement('summary');
       summary.textContent = title + ' (' + groups[title].length + ')';
       
@@ -2531,8 +2522,8 @@
             inviteInput.style.padding = '8px';
             inviteInput.style.border = '1px solid var(--border)';
             inviteInput.style.borderRadius = '4px';
-            inviteInput.style.background = '#0f1525';
-            inviteInput.style.color = 'var(--text)';
+            inviteInput.style.background = '#ffffff';
+            inviteInput.style.color = '#111111';
             inviteInput.style.fontFamily = 'inherit';
             inviteInput.style.fontSize = '14px';
             inviteInput.style.resize = 'vertical';
@@ -2953,8 +2944,8 @@
         invitesInput.style.padding = '4px 8px';
         invitesInput.style.border = '1px solid var(--border)';
         invitesInput.style.borderRadius = '4px';
-        invitesInput.style.background = '#0f1525';
-        invitesInput.style.color = 'var(--text)';
+        invitesInput.style.background = '#ffffff';
+        invitesInput.style.color = '#111111';
         invitesInput.style.fontFamily = 'inherit';
         invitesInput.style.fontSize = '12px';
         invitesInput.style.resize = 'vertical';
@@ -3025,7 +3016,15 @@
                 ev.colorId = updates.colorId;
                 ev.schoogleEventId = updates.schoogleEventId;
                 ev.inviteEmails = updates.inviteEmails;
+                const preservedOpen = Array.from(document.querySelectorAll('#viewList details[open]')).map(d => d.dataset.groupTitle).filter(Boolean);
                 loadViewEvents(document.getElementById('viewCalendarSelect').value); // Reload to get fresh data
+                setTimeout(() => {
+                  const list = document.getElementById('viewList');
+                  if (!list) return;
+                  Array.from(list.querySelectorAll('details')).forEach(d => {
+                    if (preservedOpen.indexOf(d.dataset.groupTitle) !== -1) d.open = true;
+                  });
+                }, 0);
               })
               .catch(err => {
                 console.error('updateCalendarEventFull failed', err);
