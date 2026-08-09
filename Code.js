@@ -305,8 +305,54 @@ function coerceDateWindowDate_(value, tz) {
   var raw = value.toString().trim();
   if (!raw) return null;
 
+  // Normalize common copy/paste variants: en/em dash and non-breaking spaces.
+  raw = raw
+    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015]/g, '-')
+    .replace(/\u00A0/g, ' ')
+    .trim();
+
+  // Explicit month-name support for values like 11-Jan-2027 and 11-January-2027.
+  // Keep this before generic format parsing to avoid locale-dependent behavior.
+  var m = raw.match(/^(\d{1,2})[-\s]([A-Za-z]{3,9})[-\s](\d{4})$/);
+  if (m) {
+    var day = parseInt(m[1], 10);
+    var monRaw = (m[2] || '').toLowerCase();
+    var year = parseInt(m[3], 10);
+    var monthMap = {
+      jan: 0, january: 0,
+      feb: 1, february: 1,
+      mar: 2, march: 2,
+      apr: 3, april: 3,
+      may: 4,
+      jun: 5, june: 5,
+      jul: 6, july: 6,
+      aug: 7, august: 7,
+      sep: 8, sept: 8, september: 8,
+      oct: 9, october: 9,
+      nov: 10, november: 10,
+      dec: 11, december: 11
+    };
+    if (monthMap.hasOwnProperty(monRaw)) {
+      var d1 = new Date(year, monthMap[monRaw], day);
+      if (
+        !isNaN(d1.getTime()) &&
+        d1.getFullYear() === year &&
+        d1.getMonth() === monthMap[monRaw] &&
+        d1.getDate() === day
+      ) {
+        return d1;
+      }
+    }
+  }
+
   // Try strict common spreadsheet date formats first.
-  var formats = ['yyyy-MM-dd', 'd/M/yyyy', 'dd/MM/yyyy', 'M/d/yyyy', 'MM/dd/yyyy'];
+  var formats = [
+    'yyyy-MM-dd',
+    'd/M/yyyy', 'dd/MM/yyyy',
+    'M/d/yyyy', 'MM/dd/yyyy',
+    'd-MMM-yyyy', 'dd-MMM-yyyy',
+    'd-MMMM-yyyy', 'dd-MMMM-yyyy'
+  ];
   for (var i = 0; i < formats.length; i++) {
     try {
       var parsed = Utilities.parseDate(raw, tz, formats[i]);
