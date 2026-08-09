@@ -962,6 +962,24 @@
     var replaceBtn = document.getElementById('loadConfirmReplace');
     var addBtn = document.getElementById('loadConfirmAdd');
     var cancelBtn = document.getElementById('loadConfirmCancel');
+    var container = document.getElementById('updateFormRows');
+    var hasExistingRows = !!(container && Array.from(container.querySelectorAll('.form-row')).some(function(r) { return !r.dataset.template && !r.classList.contains('header'); }));
+
+    if (!hasExistingRows) {
+      showSpinner(true);
+      dataFetcher()
+        .then(function(rows) {
+          (rows || []).forEach(function(r, index) {
+            console.log('Adding update row ' + index + ':', r);
+            addUpdateRow(r);
+          });
+          showInlineStatus('updateStatusMessage', 'Loaded ' + ((rows || []).length) + ' timetable row(s).', 'success');
+        })
+        .catch(function(err) { console.error('Loading update timetable failed', err); showInlineStatus('updateStatusMessage', 'Failed to load timetable rows.', 'danger'); alert('Failed to load timetable.'); })
+        .finally(function() { showSpinner(false); });
+      return;
+    }
+
     titleEl.textContent = title;
     messageEl.textContent = message;
     modal.style.display = '';
@@ -1722,13 +1740,40 @@
       const loadClassBtn = document.getElementById('loadClassBtn');
       const roomSelect = document.getElementById('roomSelect');
       const loadRoomBtn = document.getElementById('loadRoomBtn');
+      const showTeacherBtn = document.getElementById('showLoadOtherBtn');
+      const showClassBtn = document.getElementById('showLoadClassesBtn');
+      const showRoomBtn = document.getElementById('showLoadRoomsBtn');
+
+      if (showTeacherBtn) {
+        showTeacherBtn.addEventListener('click', () => {
+          showTeacherBtn.style.display = 'none';
+          const wrap = document.getElementById('otherLoadWrap');
+          if (wrap) wrap.style.display = '';
+        });
+      }
+
+      if (showClassBtn) {
+        showClassBtn.addEventListener('click', () => {
+          showClassBtn.style.display = 'none';
+          const wrap = document.getElementById('classLoadWrap');
+          if (wrap) wrap.style.display = '';
+        });
+      }
+
+      if (showRoomBtn) {
+        showRoomBtn.addEventListener('click', () => {
+          showRoomBtn.style.display = 'none';
+          const wrap = document.getElementById('roomLoadWrap');
+          if (wrap) wrap.style.display = '';
+        });
+      }
 
       if (loadTeacherBtn && teacherSelect) {
         loadTeacherBtn.addEventListener('click', () => {
           const email = (teacherSelect.value || '').toString().trim();
           if (!email) { showInlineStatus('addStatusMessage', 'Select a teacher timetable first.', 'warning'); return; }
           const teacherName = teacherSelect.options[teacherSelect.selectedIndex].text || email;
-          showLoadConfirmModal('Load Teacher Timetable', 'Load timetable for ' + teacherName + '?', () => rpc('getTeacherTimetable', email));
+          showLoadConfirmModal('Load Teacher Timetable', 'Load timetable for ' + teacherName + '?', () => rpc('getTeacherTimetable', email), { formContainerId: 'formRows', rowAdder: addRow });
         });
       }
 
@@ -1736,7 +1781,7 @@
         loadClassBtn.addEventListener('click', () => {
           const className = (classSelect.value || '').toString().trim();
           if (!className) { showInlineStatus('addStatusMessage', 'Select a class timetable first.', 'warning'); return; }
-          showLoadConfirmModal('Load Class Timetable', 'Load timetable for ' + className + '?', () => rpc('getClassTimetable', className));
+          showLoadConfirmModal('Load Class Timetable', 'Load timetable for ' + className + '?', () => rpc('getClassTimetable', className), { formContainerId: 'formRows', rowAdder: addRow });
         });
       }
 
@@ -1744,7 +1789,7 @@
         loadRoomBtn.addEventListener('click', () => {
           const roomName = (roomSelect.value || '').toString().trim();
           if (!roomName) { showInlineStatus('addStatusMessage', 'Select a room timetable first.', 'warning'); return; }
-          showLoadConfirmModal('Load Room Timetable', 'Load timetable for ' + roomName + '?', () => rpc('getRoomTimetable', roomName));
+          showLoadConfirmModal('Load Room Timetable', 'Load timetable for ' + roomName + '?', () => rpc('getRoomTimetable', roomName), { formContainerId: 'formRows', rowAdder: addRow });
         });
       }
     } catch (e) { console.warn('Add source loader wiring failed', e); }
@@ -1759,7 +1804,7 @@
             return rpc('getInitialData').then(data => {
               return data.userTimetable || [];
             });
-          });
+          }, { formContainerId: 'formRows', rowAdder: addRow });
         });
       }
     } catch (e) { console.warn('Load My Timetable UI wiring failed', e); }
@@ -2926,16 +2971,37 @@
   }
 
   // Show load confirmation modal
-  function showLoadConfirmModal(title, message, dataFetcher) {
+  function showLoadConfirmModal(title, message, dataFetcher, options) {
     const modal = document.getElementById('loadConfirmModal');
     const titleEl = document.getElementById('loadConfirmTitle');
     const messageEl = document.getElementById('loadConfirmMessage');
     const replaceBtn = document.getElementById('loadConfirmReplace');
     const addBtn = document.getElementById('loadConfirmAdd');
     const cancelBtn = document.getElementById('loadConfirmCancel');
+    const formContainerId = (options && options.formContainerId) || 'formRows';
+    const rowAdder = (options && options.rowAdder) || addRow;
+    const container = document.getElementById(formContainerId);
+
+    const hasExistingRows = !!(container && Array.from(container.querySelectorAll('.form-row')).some(r => !r.dataset.template && !r.classList.contains('header')));
 
     titleEl.textContent = title;
     messageEl.textContent = message;
+
+    if (!hasExistingRows) {
+      showSpinner(true);
+      dataFetcher()
+        .then(rows => {
+          (rows || []).forEach((r, index) => {
+            console.log(`Adding row ${index}:`, r);
+            rowAdder(r);
+          });
+          showInlineStatus('addStatusMessage', 'Loaded ' + ((rows || []).length) + ' timetable row(s).', 'success');
+        })
+        .catch(err => { console.error('Loading timetable failed', err); showInlineStatus('addStatusMessage', 'Failed to load timetable rows.', 'danger'); alert('Failed to load timetable.'); })
+        .finally(() => showSpinner(false));
+      return;
+    }
+
     modal.style.display = '';
 
     // Remove existing event listeners
@@ -2958,7 +3024,7 @@
           console.log('Timetable data response:', rows);
           console.log('Available periods for comparison:', state.periods);
           
-          const container = document.getElementById('formRows');
+          const container = document.getElementById(formContainerId);
           
           if (shouldReplace) {
             // clear existing non-template rows
@@ -2969,7 +3035,7 @@
           // Add rows
           (rows || []).forEach((r, index) => {
             console.log(`Adding row ${index}:`, r);
-            addRow(r);
+            rowAdder(r);
           });
           
           // Verify what was actually added to the form

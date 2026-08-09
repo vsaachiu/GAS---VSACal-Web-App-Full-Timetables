@@ -46,33 +46,37 @@
 
           <div id="formSection">
             <div class="section-instructions">Step 1: Load timetable rows (or enter rows manually). Step 2: Choose date window and preview events.</div>
-            <div class="source-grid" style="margin-bottom:10px;">
-              <div class="source-item">
-                <label>My timetable</label>
-                <button id="loadMyTimetableBtn" class="btn mini primary">Load my timetable</button>
-              </div>
-              <div class="source-item">
-                <label for="otherTeacherSelect">Teacher timetable</label>
-                <div class="source-actions">
-                  <select id="otherTeacherSelect" style="min-width:260px;"></select>
-                  <button id="loadOtherBtn" class="btn mini">Load teacher</button>
+            <div class="source-grid source-card-grid">
+              <button id="loadMyTimetableBtn" type="button" class="source-card btn primary">My timetable</button>
+              <div class="source-item source-card-wrap">
+                <button id="showLoadOtherBtn" type="button" class="source-card btn">Teacher timetable</button>
+                <div id="otherLoadWrap" class="source-expand" style="display:none;">
+                  <div class="source-actions">
+                    <select id="otherTeacherSelect"></select>
+                    <button id="loadOtherBtn" class="btn mini">Load teacher</button>
+                  </div>
                 </div>
               </div>
-              <div class="source-item">
-                <label for="classSelect">Class timetable</label>
-                <div class="source-actions">
-                  <select id="classSelect" style="min-width:260px;"></select>
-                  <button id="loadClassBtn" class="btn mini">Load class</button>
+              <div class="source-item source-card-wrap">
+                <button id="showLoadClassesBtn" type="button" class="source-card btn">Class timetable</button>
+                <div id="classLoadWrap" class="source-expand" style="display:none;">
+                  <div class="source-actions">
+                    <select id="classSelect"></select>
+                    <button id="loadClassBtn" class="btn mini">Load class</button>
+                  </div>
                 </div>
               </div>
-              <div class="source-item">
-                <label for="roomSelect">Room timetable</label>
-                <div class="source-actions">
-                  <select id="roomSelect" style="min-width:260px;"></select>
-                  <button id="loadRoomBtn" class="btn mini">Load room</button>
+              <div class="source-item source-card-wrap">
+                <button id="showLoadRoomsBtn" type="button" class="source-card btn">Room timetable</button>
+                <div id="roomLoadWrap" class="source-expand" style="display:none;">
+                  <div class="source-actions">
+                    <select id="roomSelect"></select>
+                    <button id="loadRoomBtn" class="btn mini">Load room</button>
+                  </div>
                 </div>
               </div>
             </div>
+            <h3 class="section-heading">Events to Add:</h3>
             <div class="form-rows" id="formRows">
               <div class="form-row header">
                   <label data-sort-key="title">Title</label>
@@ -109,10 +113,11 @@
             <div class="controls">
               <button id="addRowBtn" class="btn icon">＋</button>
             </div>
-            <div class="calendar-picker" style="margin-top:8px;">
+            <div class="date-window-help">Choose from which date to which date you wish to preview and add the above events.</div>
+            <div class="calendar-picker date-window-picker">
               <label>Date window</label>
               <input id="fromDate" type="date" aria-label="From date" title="From date" />
-              <span style="color:#9ca3af;">to</span>
+              <span class="date-window-sep">to</span>
               <input id="toDate" type="date" aria-label="To date" title="To date" />
             </div>
             <div class="controls">
@@ -124,7 +129,7 @@
             <div class="section-instructions">Step 2: Review generated events and edit if needed. Step 3: Select target calendar and create events.</div>
             <div id="previewMeta" class="preview-meta"></div>
             <div id="previewList" class="collapsible-list"></div>
-            <div class="calendar-picker" style="margin-top:10px;">
+            <div class="calendar-picker preview-calendar-picker">
               <label for="calendarSelect">Target calendar</label>
               <select id="calendarSelect"></select>
               <input id="newCalendarName" type="text" placeholder="New calendar name" style="display:none;" />
@@ -218,10 +223,10 @@
                 </div>
               </div>
             </div>
-            <div class="calendar-picker" style="margin-top:8px;">
+            <div class="calendar-picker update-date-window-picker">
               <label>Date window</label>
               <input id="updateFromDate" type="date" aria-label="Update from date" title="Update from date" />
-              <span style="color:#9ca3af;">to</span>
+              <span class="date-window-sep">to</span>
               <input id="updateToDate" type="date" aria-label="Update to date" title="Update to date" />
             </div>
 
