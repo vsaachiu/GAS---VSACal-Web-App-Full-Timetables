@@ -5,6 +5,8 @@
     previewEvents: [],
     calendars: [],
     dateWindows: [],
+    existingEventsInWindow: [],
+    unifiedComparison: null,
     userEmail: '',
     updateDefaultLoaded: false,
     updateDefaultLoadPending: false,
@@ -64,8 +66,6 @@
     ];
     
     metaContainer.innerHTML = metaElements.map(meta => '<span class="job-meta">' + meta + '</span>').join('');
-    
-    // Add title and metadata to title container
     titleContainer.appendChild(titleText);
     titleContainer.appendChild(metaContainer);
     
@@ -397,6 +397,92 @@
     el.textContent = 'Hello, ' + label + '!';
   }
 
+  function updateExistingEventsHeader() {
+    const hdr = document.getElementById('existingEventsHeader');
+    const sel = document.getElementById('viewCalendarSelect');
+    if (!hdr || !sel) return;
+    const label = sel.options && sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex].text : '(no calendar selected)';
+    const from = (document.getElementById('fromDate') || {}).value || '';
+    const to = (document.getElementById('toDate') || {}).value || '';
+    const range = (from || to) ? (' [' + (from || 'start') + ' to ' + (to || 'end') + ']') : '';
+    hdr.textContent = 'Existing Schoogle Events on ' + (label || '(no calendar selected)') + range;
+  }
+
+  function naturalNum(s) {
+    const m = (s || '').toString().match(/(\d+)/);
+    return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+  }
+
+  function sortTimetableRows(rows) {
+    return (rows || []).slice().sort((a, b) => {
+      const ta = (a.title || '').toString().toLowerCase();
+      const tb = (b.title || '').toString().toLowerCase();
+      if (ta < tb) return -1;
+      if (ta > tb) return 1;
+      const da = naturalNum(a.day);
+      const db = naturalNum(b.day);
+      if (da < db) return -1;
+      if (da > db) return 1;
+      const pa = naturalNum(a.periodId);
+      const pb = naturalNum(b.periodId);
+      if (pa < pb) return -1;
+      if (pa > pb) return 1;
+      return 0;
+    });
+  }
+
+  function setupDateWindowPreset(defaultFrom, defaultTo) {
+    const presetSel = document.getElementById('dateWindowPreset');
+    const fromEl = document.getElementById('fromDate');
+    const toEl = document.getElementById('toDate');
+    if (!presetSel || !fromEl || !toEl) return;
+
+    presetSel.innerHTML = '';
+    (state.dateWindows || []).forEach((w, idx) => {
+      const opt = document.createElement('option');
+      opt.value = w.displayName;
+      opt.textContent = w.displayName;
+      opt.dataset.from = w.from;
+      opt.dataset.to = w.to;
+      presetSel.appendChild(opt);
+    });
+    const customOpt = document.createElement('option');
+    customOpt.value = '__custom__';
+    customOpt.textContent = 'Custom';
+    presetSel.appendChild(customOpt);
+
+    if (state.dateWindows.length) {
+      fromEl.value = state.dateWindows[0].from;
+      toEl.value = state.dateWindows[0].to;
+      presetSel.value = state.dateWindows[0].displayName;
+    } else {
+      fromEl.value = defaultFrom || '';
+      toEl.value = defaultTo || '';
+      presetSel.value = '__custom__';
+    }
+
+    presetSel.addEventListener('change', () => {
+      if (presetSel.value === '__custom__') return;
+      const selected = Array.from(presetSel.options).find(o => o.value === presetSel.value);
+      if (!selected) return;
+      fromEl.value = selected.dataset.from || fromEl.value;
+      toEl.value = selected.dataset.to || toEl.value;
+      updateExistingEventsHeader();
+      const calId = (document.getElementById('viewCalendarSelect') || {}).value;
+      if (calId) loadViewEvents(calId);
+    });
+
+    function maybeSetCustom() {
+      const matched = (state.dateWindows || []).find(w => w.from === fromEl.value && w.to === toEl.value);
+      presetSel.value = matched ? matched.displayName : '__custom__';
+      updateExistingEventsHeader();
+      const calId = (document.getElementById('viewCalendarSelect') || {}).value;
+      if (calId) loadViewEvents(calId);
+    }
+    fromEl.addEventListener('change', maybeSetCustom);
+    toEl.addEventListener('change', maybeSetCustom);
+  }
+
   function setStepperProgress(stepperId, activeStep) {
     const root = document.getElementById(stepperId);
     if (!root) return;
@@ -466,144 +552,6 @@
       classTargets.forEach(sel => populateTextSelect(sel, classes, '-- Select class --'));
       roomTargets.forEach(sel => populateTextSelect(sel, rooms, '-- Select room --'));
     }).finally(() => showSpinner(false));
-  }
-
-  function parseNumericToken(raw) {
-    const m = (raw || '').toString().match(/(\d+)/);
-    return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
-  }
-
-  function sortTimetableRows(rows) {
-    return (rows || []).slice().sort((a, b) => {
-      const at = (a.title || '').toString().toLowerCase();
-      const bt = (b.title || '').toString().toLowerCase();
-      const tc = at.localeCompare(bt);
-      if (tc !== 0) return tc;
-      const ad = parseNumericToken(a.day || '');
-      const bd = parseNumericToken(b.day || '');
-      if (ad !== bd) return ad - bd;
-      const ap = parseNumericToken(a.periodId || '');
-      const bp = parseNumericToken(b.periodId || '');
-      if (ap !== bp) return ap - bp;
-      return (a.periodId || '').toString().localeCompare((b.periodId || '').toString());
-    });
-  }
-
-  function populateDateWindowPresets(windows) {
-    const sel = document.getElementById('dateWindowPreset');
-    if (!sel) return;
-    sel.innerHTML = '';
-    (windows || []).forEach(w => {
-      const opt = document.createElement('option');
-      opt.value = w.name;
-      opt.textContent = w.name;
-      opt.dataset.from = w.from;
-      opt.dataset.to = w.to;
-      sel.appendChild(opt);
-    });
-    const custom = document.createElement('option');
-    custom.value = '__custom__';
-    custom.textContent = 'Custom';
-    sel.appendChild(custom);
-  }
-
-  function syncDateWindowPresetFromFields() {
-    const sel = document.getElementById('dateWindowPreset');
-    const fromEl = document.getElementById('fromDate');
-    const toEl = document.getElementById('toDate');
-    if (!sel || !fromEl || !toEl) return;
-    const from = fromEl.value || '';
-    const to = toEl.value || '';
-    let matched = false;
-    Array.from(sel.options).forEach(opt => {
-      if (opt.value === '__custom__') return;
-      if ((opt.dataset.from || '') === from && (opt.dataset.to || '') === to) {
-        sel.value = opt.value;
-        matched = true;
-      }
-    });
-    if (!matched) sel.value = '__custom__';
-  }
-
-  function applyDateWindowPreset(name) {
-    const sel = document.getElementById('dateWindowPreset');
-    const fromEl = document.getElementById('fromDate');
-    const toEl = document.getElementById('toDate');
-    if (!sel || !fromEl || !toEl) return;
-    if (name === '__custom__') return;
-    const opt = Array.from(sel.options).find(o => o.value === name);
-    if (!opt) return;
-    fromEl.value = opt.dataset.from || '';
-    toEl.value = opt.dataset.to || '';
-  }
-
-  function renderUnifiedExistingEvents(events, calendarName) {
-    const header = document.getElementById('unifiedExistingHeader');
-    const list = document.getElementById('unifiedExistingList');
-    if (!header || !list) return;
-    if (!calendarName) {
-      header.style.display = 'none';
-      list.innerHTML = '';
-      return;
-    }
-
-    header.style.display = '';
-    header.textContent = 'Existing Schoogle Events on ' + calendarName;
-    list.innerHTML = '';
-    const groups = groupByTitle(events || []);
-    const titles = Object.keys(groups).sort();
-    if (!titles.length) {
-      list.innerHTML = '<div class="no-jobs">No Schoogle events found in this date window.</div>';
-      return;
-    }
-
-    titles.forEach(title => {
-      const details = document.createElement('details');
-      const summary = document.createElement('summary');
-      summary.textContent = title + ' (' + groups[title].length + ')';
-      details.appendChild(summary);
-      const ul = document.createElement('ul');
-      ul.className = 'event-list';
-      groups[title].forEach(ev => {
-        const li = document.createElement('li');
-        li.className = 'event-item';
-        const titleEl = document.createElement('div');
-        titleEl.textContent = ev.title || '(Untitled)';
-        const timeEl = document.createElement('div');
-        timeEl.className = 'event-time';
-        timeEl.textContent = fmt(ev.start) + ' -> ' + fmt(ev.end);
-        const locEl = document.createElement('div');
-        locEl.className = 'event-time';
-        locEl.textContent = ev.location || '';
-        li.appendChild(titleEl);
-        li.appendChild(timeEl);
-        li.appendChild(locEl);
-        ul.appendChild(li);
-      });
-      details.appendChild(ul);
-      list.appendChild(details);
-    });
-  }
-
-  function loadUnifiedExistingEvents() {
-    const calSel = document.getElementById('unifiedCalendarSelect');
-    const from = document.getElementById('fromDate') && document.getElementById('fromDate').value;
-    const to = document.getElementById('toDate') && document.getElementById('toDate').value;
-    if (!calSel || !calSel.value || calSel.value === '__new__') {
-      renderUnifiedExistingEvents([], '');
-      return;
-    }
-    showSpinner(true);
-    rpc('getEventsFromCalendarInRange', calSel.value, from, to)
-      .then(events => {
-        const name = calSel.options[calSel.selectedIndex] ? calSel.options[calSel.selectedIndex].textContent : 'Selected Calendar';
-        renderUnifiedExistingEvents(events || [], name);
-      })
-      .catch(err => {
-        console.error('loadUnifiedExistingEvents failed', err);
-        renderUnifiedExistingEvents([], calSel.options[calSel.selectedIndex] ? calSel.options[calSel.selectedIndex].textContent : 'Selected Calendar');
-      })
-      .finally(() => showSpinner(false));
   }
 
   function switchTab(tabId) {
@@ -1057,12 +1005,11 @@
     showSpinner(true);
     return dataFetcher()
       .then(function(rows) {
-        rows = sortTimetableRows(rows);
         var container = document.getElementById('updateFormRows');
         if (shouldReplace) {
           Array.from(container.querySelectorAll('.form-row')).filter(function(r) { return !r.dataset.template && !r.classList.contains('header'); }).forEach(function(r) { r.remove(); });
         }
-        (rows || []).forEach(function(r) { addUpdateRow(r); });
+        sortTimetableRows(rows).forEach(function(r) { addUpdateRow(r); });
         showInlineStatus('updateStatusMessage', 'Loaded ' + ((rows || []).length) + ' timetable row(s).', 'success');
       })
       .catch(function(err) {
@@ -1109,8 +1056,7 @@
       showSpinner(true);
       dataFetcher()
         .then(function(rows) {
-          rows = sortTimetableRows(rows);
-          (rows || []).forEach(function(r, index) {
+          sortTimetableRows(rows).forEach(function(r, index) {
             console.log('Adding update row ' + index + ':', r);
             addUpdateRow(r);
           });
@@ -1275,13 +1221,28 @@
     list.innerHTML = '';
     const groups = groupByTitle(state.previewEvents);
     const titles = Object.keys(groups).sort();
+    const cmp = state.unifiedComparison;
+    const normTitle = t => (t || '').toString().trim().toLowerCase();
+    const previewTitleSet = new Set((state.previewEvents || []).map(ev => normTitle(ev && ev.title)).filter(Boolean));
   console.debug('renderPreview()', { total: state.previewEvents.length, titles, groupsSample: titles.slice(0,3).reduce((acc,t)=>{acc[t]=groups[t].length;return acc;}, {}) });
 
     titles.forEach(title => {
       const events = groups[title];
       const details = document.createElement('details');
       const summary = document.createElement('summary');
-      summary.textContent = title + ' (' + events.length + ' events)';
+      if (cmp) {
+        const key = normTitle(title);
+        const matchedCount = (cmp.matched || []).filter(m => normTitle(m.preview && m.preview.title) === key).length;
+        const createCount = (cmp.newPreview || []).filter(ev => normTitle(ev && ev.title) === key).length +
+          (cmp.mismatched || []).filter(m => normTitle(m.preview && m.preview.title) === key).length;
+        const deleteCount = (cmp.orphanedExisting || []).filter(ev => {
+          const t = normTitle(ev && ev.title);
+          return t === key && previewTitleSet.has(t);
+        }).length + (cmp.mismatched || []).filter(m => normTitle(m.existing && m.existing.title) === key).length;
+        summary.textContent = title + ' (' + events.length + ' events • match ' + matchedCount + ' • create/update ' + createCount + ' • delete ' + deleteCount + ')';
+      } else {
+        summary.textContent = title + ' (' + events.length + ' events)';
+      }
       
       // Container for batch action buttons
       const batchButtonsContainer = document.createElement('div');
@@ -1652,7 +1613,17 @@
     } else if (fromDate || toDate) {
       dateWindowText = ` Date window: ${fromDate || 'start'} to ${toDate || 'end'}.`;
     }
-    
+
+    const cmp = state.unifiedComparison;
+    if (cmp) {
+      const toCreate = cmp.newPreview.length + cmp.mismatched.length;
+      const titleSet = new Set((state.previewEvents || []).map(ev => ((ev && ev.title) || '').toString().trim().toLowerCase()).filter(Boolean));
+      const scopedOrphanDelete = (cmp.orphanedExisting || []).filter(ev => titleSet.has(((ev && ev.title) || '').toString().trim().toLowerCase())).length;
+      const toDelete = scopedOrphanDelete + cmp.mismatched.length;
+      meta.textContent = `Matched: ${cmp.matched.length} | Create/Update: ${toCreate} | Delete: ${toDelete}.${dateWindowText}`;
+      return;
+    }
+
     meta.textContent = `Total events to create: ${n}. Estimated time ~ ${n}s.${dateWindowText}`;
   }
 
@@ -1677,11 +1648,6 @@
         state.calendars = cals || [];
         populateCalendars(document.getElementById('calendarSelect'), state.calendars);
         populateCalendars(document.getElementById('viewCalendarSelect'), state.calendars);
-        var _unifiedCalSel = document.getElementById('unifiedCalendarSelect');
-        if (_unifiedCalSel) {
-          populateCalendars(_unifiedCalSel, state.calendars);
-          loadUnifiedExistingEvents();
-        }
         // Populate Update tab calendar select (without "Create new" option)
         var _updateCalSel = document.getElementById('updateCalendarSelect');
         if (_updateCalSel) {
@@ -1689,6 +1655,7 @@
           var _newOpt = _updateCalSel.querySelector('option[value="__new__"]');
           if (_newOpt) _newOpt.remove();
         }
+        updateExistingEventsHeader();
         console.debug('Calendars loaded', { count: state.calendars.length, sample: state.calendars.slice(0,5) });
       })
       .catch(err => {
@@ -1763,6 +1730,8 @@
   document.getElementById('previewBtn').addEventListener('click', () => {
       const data = collectFormData();
       if (!data.length) { showInlineStatus('addStatusMessage', 'Please enter or load at least one timetable row before previewing.', 'warning'); return; }
+  const viewCalId = document.getElementById('viewCalendarSelect').value;
+  if (!viewCalId) { showInlineStatus('addStatusMessage', 'Please select a calendar in Step 2 first.', 'warning'); return; }
   const from = document.getElementById('fromDate').value;
   const to = document.getElementById('toDate').value;
       console.log('Preview click - date values:', { from, to, fromType: typeof from, toType: typeof to });
@@ -1778,8 +1747,13 @@
         }));
       console.debug('Preview click', { from, to, inputRowsCount: data.length, inputRowsSample: data.slice(0,5), allRowsSnapshotSample: rowsSnapshot.slice(0,5) });
       showSpinner(true);
-      rpc('generatePreviewEvents', { items: data, from, to })
-        .then(evts => {
+      Promise.all([
+        rpc('generatePreviewEvents', { items: data, from, to }),
+        rpc('getEventsFromCalendarInRange', viewCalId, from, to)
+      ])
+        .then(results => {
+          const evts = results[0];
+          const existingEvents = results[1] || [];
           // Always re-enable Create Events button after preview
           try { document.getElementById('createBtn').disabled = false; } catch (e) {}
           // Debug: log raw full payload (RPC_DEBUG will show full bodies; otherwise this still helps)
@@ -1843,6 +1817,8 @@
 
           console.log('Generated Events (normalized):', { count: normalized.length, sample: normalized.slice(0,5), type: Object.prototype.toString.call(evts) });
           state.previewEvents = normalized || [];
+          state.existingEventsInWindow = existingEvents;
+          state.unifiedComparison = compareEvents(existingEvents, state.previewEvents);
           
           // === DEBUG: Full state.previewEvents after Preview ===
           console.log('🔍 PREVIEW COMPLETED - state.previewEvents populated:');
@@ -1862,7 +1838,7 @@
           console.debug('generatePreviewEvents -> success', { count: state.previewEvents.length, sample: state.previewEvents.slice(0,5) });
           document.getElementById('formSection').style.display = 'none';
           document.getElementById('previewSection').style.display = '';
-          setStepperProgress('addStepper', 2);
+          setStepperProgress('addStepper', 3);
           showInlineStatus('addStatusMessage', '', '');
           updatePreviewMeta();
           renderPreview();
@@ -1897,15 +1873,6 @@
           if (wrap) wrap.style.display = '';
         });
       }
-      const otherWrap = document.getElementById('otherLoadWrap');
-      if (otherWrap && showTeacherBtn) {
-        otherWrap.addEventListener('click', (e) => {
-          if (e.target === otherWrap) {
-            otherWrap.style.display = 'none';
-            showTeacherBtn.style.display = '';
-          }
-        });
-      }
 
       if (showClassBtn) {
         showClassBtn.addEventListener('click', () => {
@@ -1914,30 +1881,12 @@
           if (wrap) wrap.style.display = '';
         });
       }
-      const classWrap = document.getElementById('classLoadWrap');
-      if (classWrap && showClassBtn) {
-        classWrap.addEventListener('click', (e) => {
-          if (e.target === classWrap) {
-            classWrap.style.display = 'none';
-            showClassBtn.style.display = '';
-          }
-        });
-      }
 
       if (showRoomBtn) {
         showRoomBtn.addEventListener('click', () => {
           showRoomBtn.style.display = 'none';
           const wrap = document.getElementById('roomLoadWrap');
           if (wrap) wrap.style.display = '';
-        });
-      }
-      const roomWrap = document.getElementById('roomLoadWrap');
-      if (roomWrap && showRoomBtn) {
-        roomWrap.addEventListener('click', (e) => {
-          if (e.target === roomWrap) {
-            roomWrap.style.display = 'none';
-            showRoomBtn.style.display = '';
-          }
         });
       }
 
@@ -2006,68 +1955,118 @@
 
       const createRunner = () => {
         setStepperProgress('addStepper', 3);
-        showInlineStatus('addStatusMessage', 'Step 3: Creating events and starting job processing.', 'info');
+        showInlineStatus('addStatusMessage', 'Step 3: Applying changes (delete unmatched + create/update events).', 'info');
         const progress = document.getElementById('createProgress');
         progress.style.display = '';
-        progress.textContent = 'Enqueuing job for ' + state.previewEvents.length + ' events…';
+        progress.textContent = 'Preparing changes…';
         try { document.getElementById('createBtn').disabled = true; } catch (e) {}
         showSpinner(true);
-        // Prepare payload: compute startDateTime/endDateTime ISO strings from editable fields
-        const payloadEvents = state.previewEvents.map(ev => {
-          const copy = Object.assign({}, ev);
-          const sDate = copy.startDate || '';
-          const sTime = copy.startTime || '';
-          const eDate = copy.endDate || copy.startDate || '';
-          const eTime = copy.endTime || '';
-          try { if (sDate && sTime) copy.startDateTime = new Date(sDate + 'T' + sTime + ':00').toISOString(); } catch(e) {}
-          try { if (eDate && eTime) copy.endDateTime = new Date(eDate + 'T' + eTime + ':00').toISOString(); } catch(e) {}
-          return copy;
-        });
+        function toPayload(events) {
+          return (events || []).map(ev => {
+            const copy = Object.assign({}, ev);
+            const sDate = copy.startDate || '';
+            const sTime = copy.startTime || '';
+            const eDate = copy.endDate || copy.startDate || '';
+            const eTime = copy.endTime || '';
+            try { if (sDate && sTime) copy.startDateTime = new Date(sDate + 'T' + sTime + ':00').toISOString(); } catch(e) {}
+            try { if (eDate && eTime) copy.endDateTime = new Date(eDate + 'T' + eTime + ':00').toISOString(); } catch(e) {}
+            return copy;
+          });
+        }
 
-        // Ensure per-user worker trigger is installed (may prompt for authorization),
-        // then enqueue job on server.
-        progress.textContent = `Installing per-user worker (may prompt for authorization)…`;
-        rpc('ensureUserWorkerTrigger')
-          .then(() => {
-            // Mark installed locally and update badge
-            try { localStorage.setItem('schoogle_worker_installed','1'); } catch (e) {}
-            try { updateWorkerStatus(true); } catch (e) {}
-            // Now enqueue the job
-            progress.textContent = 'Enqueuing job for ' + payloadEvents.length + ' events…';
-            return rpc('enqueueJob', payloadEvents, calendarId);
+        const from = (document.getElementById('fromDate') || {}).value || '';
+        const to = (document.getElementById('toDate') || {}).value || '';
+        const previewTitleSet = new Set((state.previewEvents || []).map(ev => ((ev && ev.title) || '').toString().trim().toLowerCase()).filter(Boolean));
+
+        const reconcilePromise = (calendarId === '__new__')
+          ? Promise.resolve({ toDelete: [], toCreate: toPayload(state.previewEvents) })
+          : rpc('getEventsFromCalendarInRange', calendarId, from, to).then(existingEvents => {
+              state.existingEventsInWindow = existingEvents || [];
+              const cmp = compareEvents(state.existingEventsInWindow, state.previewEvents);
+              state.unifiedComparison = cmp;
+              updatePreviewMeta();
+
+              const orphanedScoped = (cmp.orphanedExisting || []).filter(ev => {
+                const t = ((ev && ev.title) || '').toString().trim().toLowerCase();
+                return !!t && previewTitleSet.has(t);
+              });
+
+              const toDelete = []
+                .concat((cmp.mismatched || []).map(m => m.existing))
+                .concat(orphanedScoped);
+              const toCreate = toPayload([].concat((cmp.mismatched || []).map(m => m.preview)).concat(cmp.newPreview || []));
+              return { toDelete: toDelete, toCreate: toCreate };
+            });
+
+        reconcilePromise
+          .then(plan => {
+            const toDelete = plan.toDelete || [];
+            const toCreate = plan.toCreate || [];
+
+            if (!toDelete.length && !toCreate.length) {
+              showInlineStatus('addStatusMessage', 'No changes detected. Everything is already in sync.', 'success');
+              return null;
+            }
+
+            const confirmMsg = 'Apply changes to this calendar?\\n\\nDelete: ' + toDelete.length + ' existing event(s)\\nCreate/Update: ' + toCreate.length + ' event(s)';
+            if (!window.confirm(confirmMsg)) throw new Error('USER_CANCELLED_APPLY');
+
+            const deletePromise = toDelete.length
+              ? rpc('deleteEventsByIds', calendarId, toDelete.map(ev => ev.id))
+              : Promise.resolve({ deleted: 0 });
+
+            return deletePromise.then(deleteResult => ({
+              deleted: (deleteResult && deleteResult.deleted) ? deleteResult.deleted : toDelete.length,
+              toCreate: toCreate
+            }));
           })
-          .then(jobId => {
-            console.debug('Job enqueued', { jobId });
-            progress.textContent = 'Job queued: ' + jobId + '. Check Jobs tab for progress…';
-            showInlineStatus('addStatusMessage', 'Success: job ' + jobId + ' has been queued. Check Active Jobs for progress.', 'success');
-            
-            // ✅ CLEAR preview events after successful enqueue
-            console.log('🔍 CLEARING state.previewEvents after successful job enqueue');
+          .then(plan => {
+            if (!plan) return null;
+            if (!plan.toCreate.length) return { deleted: plan.deleted, created: 0, jobId: null };
+
+            progress.textContent = 'Installing per-user worker (may prompt for authorization)…';
+            return rpc('ensureUserWorkerTrigger')
+              .then(() => {
+                try { localStorage.setItem('schoogle_worker_installed','1'); } catch (e) {}
+                try { updateWorkerStatus(true); } catch (e) {}
+                progress.textContent = 'Enqueuing job for ' + plan.toCreate.length + ' events…';
+                return rpc('enqueueJob', plan.toCreate, calendarId).then(jobId => ({ deleted: plan.deleted, created: plan.toCreate.length, jobId: jobId }));
+              });
+          })
+          .then(result => {
+            if (!result) return;
+            progress.textContent = result.jobId ? ('Job queued: ' + result.jobId + '. Check Jobs tab for progress…') : 'Changes applied. No create job needed.';
+            showInlineStatus('addStatusMessage', 'Applied changes. Deleted ' + result.deleted + ' and queued ' + result.created + ' event(s).' + (result.jobId ? ' Job: ' + result.jobId : ''), 'success');
+
             state.previewEvents = [];
-            const previewContainer = document.getElementById('previewContainer');
-            if (previewContainer) previewContainer.innerHTML = '';
+            state.unifiedComparison = null;
             updatePreviewMeta();
-            
-            // Switch back to form view since preview is now cleared
+            renderPreview();
+
             document.getElementById('formSection').style.display = '';
             document.getElementById('previewSection').style.display = 'none';
             setStepperProgress('addStepper', 1);
-            
-            // Ensure jobs list poller starts so Jobs tab shows the queued job
-            try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
-            // Fire-and-forget kickoff so processing starts ASAP, even if the timed trigger hasn't fired yet
-            try { setTimeout(() => { rpc('processUserJobs').catch(() => {}); }, 0); } catch (e) { /* ignore */ }
-            // Navigate user to the Jobs tab and refresh list so they see progress there
-            try { switchTab('jobsTab'); } catch (e) { /* ignore */ }
-            try { updateJobsUI(); } catch (e) { /* ignore */ }
+
+            if (result.jobId) {
+              try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
+              try { setTimeout(() => { rpc('processUserJobs').catch(() => {}); }, 0); } catch (e) { /* ignore */ }
+              try { switchTab('jobsTab'); } catch (e) { /* ignore */ }
+              try { updateJobsUI(); } catch (e) { /* ignore */ }
+            }
           })
           .catch(err => {
-            console.error('enqueueJob/ensureWorker failed', err);
-            showInlineStatus('addStatusMessage', 'Failed to install worker or queue events. Please retry.', 'danger');
-            alert('Failed to install worker or enqueue job: ' + (err && err.message ? err.message : err));
-            try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+            if (err && err.message === 'USER_CANCELLED_APPLY') {
+              showInlineStatus('addStatusMessage', 'Apply canceled.', 'warning');
+              return;
+            }
+            console.error('Unified apply failed', err);
+            showInlineStatus('addStatusMessage', 'Failed to apply changes. Please retry.', 'danger');
+            alert('Failed to apply changes: ' + (err && err.message ? err.message : err));
           })
-          .finally(() => showSpinner(false));
+          .finally(() => {
+            try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+            showSpinner(false);
+          });
       };
 
       if (calendarId === '__new__') {
@@ -2081,6 +2080,12 @@
             showInlineStatus('addStatusMessage', 'Calendar created. Queueing events next.', 'success');
             loadCalendars();
             createRunner();
+          })
+          .catch(err => {
+            console.error('createNewCalendar failed', err);
+            showInlineStatus('addStatusMessage', 'Failed to create calendar.', 'danger');
+            alert('Failed to create calendar: ' + (err && err.message ? err.message : err));
+            showSpinner(false);
           });
       } else {
         createRunner();
@@ -2205,52 +2210,27 @@
     document.getElementById('calendarSelect').addEventListener('change', (e) => {
       const val = e.target.value;
       document.getElementById('newCalendarName').style.display = (val === '__new__') ? '' : 'none';
+      if (val && val !== '__new__') {
+        const viewSel = document.getElementById('viewCalendarSelect');
+        if (viewSel) {
+          viewSel.value = val;
+          updateExistingEventsHeader();
+          loadViewEvents(val);
+        }
+      }
     });
 
     // View tab calendar select
     document.getElementById('viewCalendarSelect').addEventListener('change', (e) => {
       const id = e.target.value;
+      updateExistingEventsHeader();
+      setStepperProgress('addStepper', id ? 2 : 1);
+      try {
+        const targetSel = document.getElementById('calendarSelect');
+        if (targetSel) targetSel.value = id;
+      } catch (err) { /* ignore */ }
       if (id) loadViewEvents(id);
     });
-
-    const unifiedCalSel = document.getElementById('unifiedCalendarSelect');
-    if (unifiedCalSel) {
-      unifiedCalSel.addEventListener('change', (e) => {
-        const val = e.target.value;
-        const addCalSel = document.getElementById('calendarSelect');
-        if (addCalSel && val) {
-          addCalSel.value = val;
-          const newNameEl = document.getElementById('newCalendarName');
-          if (newNameEl) newNameEl.style.display = (val === '__new__') ? '' : 'none';
-        }
-        loadUnifiedExistingEvents();
-      });
-    }
-
-    const datePresetSel = document.getElementById('dateWindowPreset');
-    if (datePresetSel) {
-      datePresetSel.addEventListener('change', (e) => {
-        applyDateWindowPreset(e.target.value);
-        loadUnifiedExistingEvents();
-      });
-    }
-
-    const fromDateElHook = document.getElementById('fromDate');
-    const toDateElHook = document.getElementById('toDate');
-    if (fromDateElHook) {
-      fromDateElHook.addEventListener('change', () => {
-        const sel = document.getElementById('dateWindowPreset');
-        if (sel) sel.value = '__custom__';
-        loadUnifiedExistingEvents();
-      });
-    }
-    if (toDateElHook) {
-      toDateElHook.addEventListener('change', () => {
-        const sel = document.getElementById('dateWindowPreset');
-        if (sel) sel.value = '__custom__';
-        loadUnifiedExistingEvents();
-      });
-    }
 
     // Initial data load
     showSpinner(true);
@@ -2261,7 +2241,6 @@
         state.dateWindows = data.dateWindows || [];
         state.userEmail = data.userEmail || '';
         updateWelcomeHeading();
-        populateDateWindowPresets(state.dateWindows);
         setStepperProgress('addStepper', 1);
         setStepperProgress('updateStepper', 1);
         showInlineStatus('addStatusMessage', 'Step 1: Load a timetable source, then review the rows below.', 'info');
@@ -2272,27 +2251,16 @@
         const toDateEl = document.getElementById('toDate');
         console.log('Date elements found:', { fromDateEl: !!fromDateEl, toDateEl: !!toDateEl });
         
-        if (data.defaultFrom && fromDateEl) {
-          console.log('Setting fromDate to:', data.defaultFrom);
-          fromDateEl.value = data.defaultFrom;
-          console.log('fromDate value after setting:', fromDateEl.value);
-        }
-        if (data.defaultTo && toDateEl) {
-          console.log('Setting toDate to:', data.defaultTo);
-          toDateEl.value = data.defaultTo;
-          console.log('toDate value after setting:', toDateEl.value);
-        }
-        syncDateWindowPresetFromFields();
+        setupDateWindowPreset(data.defaultFrom, data.defaultTo);
         
         // Set Update tab dates
         var _updateFromEl = document.getElementById('updateFromDate');
         var _updateToEl = document.getElementById('updateToDate');
-        if (data.defaultFrom && _updateFromEl) _updateFromEl.value = data.defaultFrom;
-        if (data.defaultTo && _updateToEl) _updateToEl.value = data.defaultTo;
+        if (data.defaultFrom && _updateFromEl && !_updateFromEl.value) _updateFromEl.value = data.defaultFrom;
+        if (data.defaultTo && _updateToEl && !_updateToEl.value) _updateToEl.value = data.defaultTo;
         
         hydrateSourceSelectors();
         loadCalendars();
-        loadUnifiedExistingEvents();
         // Start job polling
         try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
       })
@@ -3159,9 +3127,13 @@
 
   function loadViewEvents(calendarId) {
     showSpinner(true);
-    rpc('getEventsFromCalendar', calendarId)
+    const from = (document.getElementById('fromDate') || {}).value || '';
+    const to = (document.getElementById('toDate') || {}).value || '';
+    updateExistingEventsHeader();
+    rpc('getEventsFromCalendarInRange', calendarId, from, to)
       .then(events => {
         renderViewEvents(events || []);
+        state.existingEventsInWindow = events || [];
       })
       .catch(err => console.error('getEventsFromCalendar failed', err))
       .finally(() => showSpinner(false));
@@ -3206,8 +3178,7 @@
       showSpinner(true);
       dataFetcher()
         .then(rows => {
-          rows = sortTimetableRows(rows);
-          (rows || []).forEach((r, index) => {
+          sortTimetableRows(rows).forEach((r, index) => {
             console.log(`Adding row ${index}:`, r);
             rowAdder(r);
           });
@@ -3237,7 +3208,6 @@
       showSpinner(true);
       dataFetcher()
         .then(rows => {
-          rows = sortTimetableRows(rows);
           console.log('Timetable data response:', rows);
           console.log('Available periods for comparison:', state.periods);
           
@@ -3250,7 +3220,7 @@
           }
           
           // Add rows
-          (rows || []).forEach((r, index) => {
+          sortTimetableRows(rows).forEach((r, index) => {
             console.log(`Adding row ${index}:`, r);
             rowAdder(r);
           });

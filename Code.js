@@ -22,9 +22,9 @@
 // Core Data Sheets
 const SHEET_TIMETABLE_MASTER = 'TIMETABLE_MASTER';  // Main timetable: EMAIL, teacherName, periodName, class, day, time, room
 const SHEET_DAYS = 'Days';                          // Date mapping: DAY, Date, Day Type, RAW DAY TITLE, CORE DAY, CycleNum
+const SHEET_DATE_WINDOWS = 'DateWindows';           // Date window presets: Display Name, Date From, Date To
 const SHEET_DAY_TIMES = 'DayTimes';                 // Time periods: DayType, PERIOD NAME, START TIME, END TIME, OLD PERIOD NAME, WEB Display Name, Order
 const SHEET_PERIOD_NAMES = 'PeriodNames';           // Period name definitions
-const SHEET_DATE_WINDOWS = 'DateWindows';           // Date presets: Display Name, Date From, Date To
 
 // System Management Sheets
 const SHEET_JOBS = 'JOBS';                          // Job queue for background processing
@@ -217,37 +217,33 @@ function getInitialData() {
   };
 }
 
-// Return date window presets from DateWindows sheet in client-safe yyyy-MM-dd format
 function getDateWindows() {
   var ss = SpreadsheetApp.getActive();
-  var sh = ss.getSheetByName(SHEET_DATE_WINDOWS);
-  if (!sh) return [];
-
-  var vals = sh.getDataRange().getValues();
-  if (!vals || vals.length < 2) return [];
-
+  var sheet = ss.getSheetByName(SHEET_DATE_WINDOWS);
   var tz = Session.getScriptTimeZone() || 'Asia/Hong_Kong';
-  var out = [];
+  var windows = [];
+  if (!sheet) return windows;
+
+  var vals = sheet.getDataRange().getValues();
   for (var i = 1; i < vals.length; i++) {
-    var row = vals[i] || [];
+    var row = vals[i];
     var name = (row[0] || '').toString().trim();
-    var fromRaw = row[1];
-    var toRaw = row[2];
+    var fromVal = row[1];
+    var toVal = row[2];
     if (!name) continue;
+    if (!(fromVal instanceof Date) || !(toVal instanceof Date)) continue;
 
-    var from = normalizeToDate(fromRaw);
-    var to = normalizeToDate(toRaw);
-    if (!from || !to) continue;
+    var fromStr = Utilities.formatDate(fromVal, tz, 'yyyy-MM-dd');
+    var toStr = Utilities.formatDate(toVal, tz, 'yyyy-MM-dd');
+    if (fromStr > toStr) continue;
 
-    var fromYmd = Utilities.formatDate(from, tz, 'yyyy-MM-dd');
-    var toYmd = Utilities.formatDate(to, tz, 'yyyy-MM-dd');
-    out.push({
-      name: name,
-      from: fromYmd,
-      to: toYmd
+    windows.push({
+      displayName: name,
+      from: fromStr,
+      to: toStr
     });
   }
-  return out;
+  return windows;
 }
 
 // Return a list of teachers (email + display name)
