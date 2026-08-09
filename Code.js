@@ -230,12 +230,24 @@ function getDateWindows() {
     var name = (row[0] || '').toString().trim();
     var fromVal = row[1];
     var toVal = row[2];
-    if (!name) continue;
-    if (!(fromVal instanceof Date) || !(toVal instanceof Date)) continue;
+    if (!name) {
+      Logger.log('DateWindows row ' + (i + 1) + ' skipped: empty display name');
+      continue;
+    }
 
-    var fromStr = Utilities.formatDate(fromVal, tz, 'yyyy-MM-dd');
-    var toStr = Utilities.formatDate(toVal, tz, 'yyyy-MM-dd');
-    if (fromStr > toStr) continue;
+    var fromDate = coerceDateWindowDate_(fromVal, tz);
+    var toDate = coerceDateWindowDate_(toVal, tz);
+    if (!fromDate || !toDate) {
+      Logger.log('DateWindows row ' + (i + 1) + ' skipped: invalid date(s) [from=' + fromVal + ', to=' + toVal + ']');
+      continue;
+    }
+
+    var fromStr = Utilities.formatDate(fromDate, tz, 'yyyy-MM-dd');
+    var toStr = Utilities.formatDate(toDate, tz, 'yyyy-MM-dd');
+    if (fromStr > toStr) {
+      Logger.log('DateWindows row ' + (i + 1) + ' skipped: from > to [' + fromStr + ' > ' + toStr + ']');
+      continue;
+    }
 
     windows.push({
       displayName: name,
@@ -243,7 +255,70 @@ function getDateWindows() {
       to: toStr
     });
   }
+  Logger.log('DateWindows loaded: ' + windows.length + ' valid row(s)');
   return windows;
+}
+
+function debugDateWindowsRows() {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName(SHEET_DATE_WINDOWS);
+  var tz = Session.getScriptTimeZone() || 'Asia/Hong_Kong';
+  if (!sheet) return [{ error: 'Sheet not found: ' + SHEET_DATE_WINDOWS }];
+
+  var vals = sheet.getDataRange().getValues();
+  var out = [];
+  for (var i = 1; i < vals.length; i++) {
+    var row = vals[i] || [];
+    var name = (row[0] || '').toString().trim();
+    var fromRaw = row[1];
+    var toRaw = row[2];
+    var fromDate = coerceDateWindowDate_(fromRaw, tz);
+    var toDate = coerceDateWindowDate_(toRaw, tz);
+
+    var reason = '';
+    if (!name) reason = 'empty_name';
+    else if (!fromDate || !toDate) reason = 'invalid_date';
+    else {
+      var fromStrCmp = Utilities.formatDate(fromDate, tz, 'yyyy-MM-dd');
+      var toStrCmp = Utilities.formatDate(toDate, tz, 'yyyy-MM-dd');
+      if (fromStrCmp > toStrCmp) reason = 'from_after_to';
+    }
+
+    out.push({
+      rowNumber: i + 1,
+      displayName: name,
+      fromRaw: fromRaw,
+      toRaw: toRaw,
+      fromParsed: fromDate ? Utilities.formatDate(fromDate, tz, 'yyyy-MM-dd') : null,
+      toParsed: toDate ? Utilities.formatDate(toDate, tz, 'yyyy-MM-dd') : null,
+      valid: !reason,
+      reason: reason || 'ok'
+    });
+  }
+  return out;
+}
+
+function coerceDateWindowDate_(value, tz) {
+  if (value instanceof Date) return value;
+  if (value === null || value === undefined) return null;
+
+  var raw = value.toString().trim();
+  if (!raw) return null;
+
+  // Try strict common spreadsheet date formats first.
+  var formats = ['yyyy-MM-dd', 'd/M/yyyy', 'dd/MM/yyyy', 'M/d/yyyy', 'MM/dd/yyyy'];
+  for (var i = 0; i < formats.length; i++) {
+    try {
+      var parsed = Utilities.parseDate(raw, tz, formats[i]);
+      if (parsed instanceof Date && !isNaN(parsed.getTime())) return parsed;
+    } catch (e) {
+      // ignore and continue trying other formats
+    }
+  }
+
+  // Last fallback for already ISO-like strings.
+  var fallback = new Date(raw);
+  return isNaN(fallback.getTime()) ? null : fallback;
 }
 
 // Return a list of teachers (email + display name)
