@@ -1,9 +1,45 @@
+/**
+ * VSA Calendar Web App - Full Timetables
+ * 
+ * This Google Apps Script manages timetable scheduling and calendar event creation
+ * for the VSA school system. It provides a web interface for teachers and administrators
+ * to view, manage, and create calendar events based on timetable data.
+ * 
+ * Key Components:
+ * - Web interface for timetable management
+ * - Google Sheets integration for data storage
+ * - Google Calendar integration for event creation
+ * - Background job processing for batch operations
+ * 
+ * Data Sources:
+ * - TIMETABLE_MASTER: Core timetable data with teacher assignments
+ * - Days: Date mappings to day cycles and day types
+ * - DayTimes: Period time definitions for different day types
+ * - Supporting sheets for jobs, logs, and metadata
+ */
+
+// ===== GLOBAL SHEET NAME CONSTANTS =====
+// Core Data Sheets
+const SHEET_TIMETABLE_MASTER = 'TIMETABLE_MASTER';  // Main timetable: EMAIL, teacherName, periodName, class, day, time, room
+const SHEET_DAYS = 'Days';                          // Date mapping: DAY, Date, Day Type, RAW DAY TITLE, CORE DAY, CycleNum
+const SHEET_DAY_TIMES = 'DayTimes';                 // Time periods: DayType, PERIOD NAME, START TIME, END TIME, OLD PERIOD NAME, WEB Display Name, Order
+const SHEET_PERIOD_NAMES = 'PeriodNames';           // Period name definitions
+
+// System Management Sheets
+const SHEET_JOBS = 'JOBS';                          // Job queue for background processing
+const SHEET_CREATED_EVENTS = 'Created Events';     // Log of created calendar events
+const SHEET_JOB_LOG = 'Job Log';                   // Job execution history and status
+const SHEET_CLASS_SESSIONS = 'Class Sessions';     // Class session tracking
+const SHEET_META = 'Meta';                         // Application metadata and settings
+
+// ===== MAIN FUNCTIONS =====
+
 function getSetDays(){
   var staffCalId = 'vsa.edu.hk_naek8tnu54moqgqfbef6vr85bc@group.calendar.google.com';
-  var start = new Date('1-Aug-2025');
-  var end = new Date('30-Jun-2026');
+  var start = new Date('1-Aug-2026');
+  var end = new Date('30-Jun-2027');
   var events = CalendarApp.getCalendarById(staffCalId).getEvents(start, end);
-  var daylist = ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7", "Day 8", "Day 9", "Day 10", "Day 0"];
+  var daylist = ["Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7", "Day 8", "Day 9", "Day 10", "Day 0", "Day 1"];
   var outRows = [];
   var tz = Session.getScriptTimeZone() || 'Asia/Hong_Kong';
 
@@ -72,7 +108,7 @@ function getInitialData() {
   var defaultTo = '';
 
   // PeriodNames: Columns: periodID, Display Text
-  var periodSheet = ss.getSheetByName('PeriodNames');
+  var periodSheet = ss.getSheetByName(SHEET_PERIOD_NAMES);
   if (periodSheet) {
     var pVals = periodSheet.getDataRange().getValues();
     for (var i = 1; i < pVals.length; i++) {
@@ -83,7 +119,7 @@ function getInitialData() {
   }
 
   // TIMETABLE_MASTER: EMAIL(A), teacher Name(B), period Name(C), class/title(D), day(E), time(F), room/location(G)
-  var ttSheet = ss.getSheetByName('TIMETABLE_MASTER');
+  var ttSheet = ss.getSheetByName(SHEET_TIMETABLE_MASTER);
   if (ttSheet) {
     var tVals = ttSheet.getDataRange().getValues();
     // Collect user timetable if email present
@@ -118,19 +154,55 @@ function getInitialData() {
   } catch (e) { teachers = []; }
 
   // Determine default date range from Days sheet (col B)
-  var daysSheet = ss.getSheetByName('Days');
+  var daysSheet = ss.getSheetByName(SHEET_DAYS);
+  Logger.log('getInitialData - Days sheet found: ' + (daysSheet ? 'YES' : 'NO'));
+  console.log('Looking for Days sheet:', daysSheet ? 'Found' : 'Not found');
   if (daysSheet) {
     var dVals = daysSheet.getDataRange().getValues();
+    Logger.log('getInitialData - Days sheet rows: ' + dVals.length);
+    console.log('Days sheet data rows:', dVals.length);
     var minD = null, maxD = null;
     for (var i2 = 1; i2 < dVals.length; i2++) {
-      var dCell = dVals[i2][1];
+      var dCell = dVals[i2][1]; // Column B (index 1)
       if (!dCell) continue;
+      Logger.log('getInitialData - Processing date cell [' + i2 + '][1]: ' + dCell + ' (type: ' + typeof dCell + ')');
       var dObj = normalizeToDate(dCell);
-      if (!minD || dObj.getTime() < minD.getTime()) minD = dObj;
-      if (!maxD || dObj.getTime() > maxD.getTime()) maxD = dObj;
+      Logger.log('getInitialData - Normalized to: ' + dObj);
+      if (!dObj) continue; // Skip invalid dates
+      if (!minD || dObj.getTime() < minD.getTime()) {
+        minD = dObj;
+        Logger.log('getInitialData - New minimum date: ' + minD);
+      }
+      if (!maxD || dObj.getTime() > maxD.getTime()) {
+        maxD = dObj;
+        Logger.log('getInitialData - New maximum date: ' + maxD);
+      }
     }
-    if (minD) defaultFrom = Utilities.formatDate(minD, Session.getScriptTimeZone() || 'Asia/Hong_Kong', 'yyyy-MM-dd');
-    if (maxD) defaultTo = Utilities.formatDate(maxD, Session.getScriptTimeZone() || 'Asia/Hong_Kong', 'yyyy-MM-dd');
+    Logger.log('getInitialData - Final date range: ' + minD + ' to ' + maxD);
+    console.log('Date range found:', minD, 'to', maxD);
+    if (minD) {
+      defaultFrom = Utilities.formatDate(minD, Session.getScriptTimeZone() || 'Asia/Hong_Kong', 'yyyy-MM-dd');
+      Logger.log('getInitialData - Formatted defaultFrom: ' + defaultFrom);
+      console.log('Formatted defaultFrom:', defaultFrom, 'from date object:', minD);
+    }
+    if (maxD) {
+      defaultTo = Utilities.formatDate(maxD, Session.getScriptTimeZone() || 'Asia/Hong_Kong', 'yyyy-MM-dd');
+      Logger.log('getInitialData - Formatted defaultTo: ' + defaultTo);
+      console.log('Formatted defaultTo:', defaultTo, 'from date object:', maxD);
+    }
+    Logger.log('getInitialData - Final formatted dates: FROM=' + defaultFrom + ', TO=' + defaultTo);
+    console.log('Final formatted dates:', defaultFrom, 'to', defaultTo);
+  } else {
+    // Fallback: Set default date range to current week
+    var today = new Date();
+    var monday = new Date(today);
+    monday.setDate(today.getDate() - today.getDay() + 1);
+    var friday = new Date(monday);
+    friday.setDate(monday.getDate() + 4);
+    
+    defaultFrom = Utilities.formatDate(monday, Session.getScriptTimeZone() || 'Asia/Hong_Kong', 'yyyy-MM-dd');
+    defaultTo = Utilities.formatDate(friday, Session.getScriptTimeZone() || 'Asia/Hong_Kong', 'yyyy-MM-dd');
+    console.log('Using fallback date range:', defaultFrom, 'to', defaultTo);
   }
 
   return { periods: periods, userTimetable: userTimetable, userEmail: email, defaultFrom: defaultFrom, defaultTo: defaultTo, teachers: teachers };
@@ -139,7 +211,7 @@ function getInitialData() {
 // Return a list of teachers (email + display name)
 function getTeachers() {
   var ss = SpreadsheetApp.getActive();
-  var ttSheet = ss.getSheetByName('TIMETABLE_MASTER');
+  var ttSheet = ss.getSheetByName(SHEET_TIMETABLE_MASTER);
   var out = [];
   if (!ttSheet) return out;
   var vals = ttSheet.getDataRange().getValues();
@@ -160,7 +232,7 @@ function getTeachers() {
 // Get all unique classes from TIMETABLE_MASTER sheet (column D)
 function getClasses() {
   var ss = SpreadsheetApp.getActive();
-  var ttSheet = ss.getSheetByName('TIMETABLE_MASTER');
+  var ttSheet = ss.getSheetByName(SHEET_TIMETABLE_MASTER);
   var out = [];
   if (!ttSheet) return out;
   var vals = ttSheet.getDataRange().getValues();
@@ -180,12 +252,52 @@ function getClasses() {
   return out;
 }
 
+// Get all unique rooms from TIMETABLE_MASTER sheet (column G - index 6)
+function getRooms() {
+  var ss = SpreadsheetApp.getActive();
+  var ttSheet = ss.getSheetByName(SHEET_TIMETABLE_MASTER);
+  var out = [];
+  if (!ttSheet) return out;
+  var vals = ttSheet.getDataRange().getValues();
+  var seen = {};
+  for (var i = 1; i < vals.length; i++) {
+    var row = vals[i];
+    var roomName = (row[6] || '').toString().trim(); // Column G (index 6)
+    if (!roomName) continue;
+    if (seen[roomName]) continue;
+    // Skip empty locations or common non-room entries
+    if (roomName.toLowerCase() === 'tbc' || roomName.toLowerCase() === 'tbd' || roomName.toLowerCase() === 'various') continue;
+    seen[roomName] = true;
+    out.push(roomName);
+  }
+  // Sort alphabetically
+  out.sort(function(a, b) { return a.localeCompare(b); });
+  return out;
+}
+
+// Return timetable rows for a given room name
+function getRoomTimetable(roomName) {
+  var out = [];
+  if (!roomName) return out;
+  var ss = SpreadsheetApp.getActive();
+  var ttSheet = ss.getSheetByName(SHEET_TIMETABLE_MASTER);
+  if (!ttSheet) return out;
+  var vals = ttSheet.getDataRange().getValues();
+  for (var i = 1; i < vals.length; i++) {
+    var row = vals[i];
+    var location = (row[6] || '').toString().trim(); // Column G (index 6)
+    if (!location || location.toLowerCase() !== roomName.toLowerCase()) continue;
+    out.push({ day: (row[4] || '').toString().trim(), periodId: (row[2] || '').toString().trim(), title: (row[3] || '').toString().trim(), location: (row[6] || '').toString().trim() });
+  }
+  return out;
+}
+
 // Return timetable rows for a given teacher email
 function getTeacherTimetable(teacherEmail) {
   var out = [];
   if (!teacherEmail) return out;
   var ss = SpreadsheetApp.getActive();
-  var ttSheet = ss.getSheetByName('TIMETABLE_MASTER');
+  var ttSheet = ss.getSheetByName(SHEET_TIMETABLE_MASTER);
   if (!ttSheet) return out;
   var vals = ttSheet.getDataRange().getValues();
   for (var i = 1; i < vals.length; i++) {
@@ -202,7 +314,7 @@ function getClassTimetable(className) {
   var out = [];
   if (!className) return out;
   var ss = SpreadsheetApp.getActive();
-  var ttSheet = ss.getSheetByName('TIMETABLE_MASTER');
+  var ttSheet = ss.getSheetByName(SHEET_TIMETABLE_MASTER);
   if (!ttSheet) return out;
   var vals = ttSheet.getDataRange().getValues();
   for (var i = 1; i < vals.length; i++) {
@@ -244,33 +356,51 @@ function createNewCalendar(calendarName) {
 }
 
 function generatePreviewEvents(formData) {
+  Logger.log('=== generatePreviewEvents START ===');
+  Logger.log('Raw formData received: ' + JSON.stringify(formData));
+  console.log('generatePreviewEvents called with:', formData);
   var ss = SpreadsheetApp.getActive();
 
+  var payload = formData || {};
+  Logger.log('Processed payload: ' + JSON.stringify(payload));
+  console.log('Payload items:', payload.items, 'from:', payload.from, 'to:', payload.to);
 
   // Days: Columns: Day, Date, DayType, CycleNum
-  var daysSheet = ss.getSheetByName('Days');
+  var daysSheet = ss.getSheetByName(SHEET_DAYS);
+  Logger.log('Days sheet found: ' + (daysSheet ? 'YES' : 'NO'));
+  console.log('Found Days sheet:', daysSheet ? 'Yes' : 'No');
   var dayRows = daysSheet ? daysSheet.getDataRange().getValues() : [];
+  Logger.log('Days sheet rows count: ' + dayRows.length);
+  console.log('Days sheet rows:', dayRows.length);
   var days = [];
   for (var i = 1; i < dayRows.length; i++) {
     var d = dayRows[i];
-    days.push({
+    var dayEntry = {
       Day: (d[0] || '').toString().trim(),
       Date: d[1],
       DayType: d[2].toString().trim(), //(d[2] || '').toString().trim(),
       CycleNum: (d[5] || '').toString().trim()
-    });
+    };
+    days.push(dayEntry);
+    if (i <= 3) { // Log first 3 entries for debugging
+      Logger.log('DAY entry ' + i + ': ' + JSON.stringify(dayEntry));
+    }
   } 
-
+  Logger.log('Total days processed: ' + days.length);
+  console.log('Processed days:', days.length, 'Sample:', days.slice(0, 3));
 
   // DayTimes: Columns: DayType, PeriodID, START TIME, END TIME
-  var dtSheet = ss.getSheetByName('DayTimes');
+  var dtSheet = ss.getSheetByName(SHEET_DAY_TIMES);
+  console.log('Found DayTimes sheet:', dtSheet ? 'Yes' : 'No');
   var dtRows = dtSheet ? dtSheet.getDataRange().getValues() : [];
+  console.log('DayTimes sheet rows:', dtRows.length);
   var dayTimesMap = {}; // key: DayType|PeriodID -> {start: Date|String, end: Date|String}
   for (var j = 1; j < dtRows.length; j++) {
     var row = dtRows[j];
     var key = [(row[0] || '').toString().trim(), (row[1] || '').toString().trim()].join('|');
     dayTimesMap[key] = { start: row[2], end: row[3] };
   }
+  console.log('DayTimes map keys:', Object.keys(dayTimesMap).slice(0, 5));
 
 
   // Determine date window
@@ -346,42 +476,71 @@ function generatePreviewEvents(formData) {
 
   var fromDate = payload.from ? normalizeToDate(payload.from) : null;
   var toDate = payload.to ? normalizeToDate(payload.to) : null;
+  Logger.log('Date parsing - FROM input: "' + payload.from + '" -> parsed: ' + fromDate);
+  Logger.log('Date parsing - TO input: "' + payload.to + '" -> parsed: ' + toDate);
+  console.log('Initial parsed dates:', { fromDate, toDate, fromInput: payload.from, toInput: payload.to });
+  
   if (!fromDate || !toDate) {
+    Logger.log('Missing dates, falling back to Days sheet range');
+    console.log('Missing dates, falling back to Days sheet range');
     // fallback to min/max in Days
     for (var k = 0; k < days.length; k++) {
       var dOnly = normalizeToDate(days[k].Date);
+      if (!dOnly) continue; // Skip invalid dates
       if (!fromDate || dOnly.getTime() < fromDate.getTime()) fromDate = dOnly;
       if (!toDate || dOnly.getTime() > toDate.getTime()) toDate = dOnly;
     }
+    Logger.log('Fallback dates - FROM: ' + fromDate + ', TO: ' + toDate);
+    console.log('Fallback dates from Days sheet:', { fromDate, toDate });
   }
   // Normalize times for inclusive compare
   if (fromDate) fromDate = new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate(), 0, 0, 0, 0);
   if (toDate) toDate = new Date(toDate.getFullYear(), toDate.getMonth(), toDate.getDate(), 23, 59, 59, 999);
+  Logger.log('Normalized date range - FROM: ' + fromDate + ', TO: ' + toDate);
   //Debug:
   console.log('Date Range:', { fromDate, toDate });
   console.log('Payload Items:', payload.items);
 
-  (payload.items || []).forEach(function (item) {
+  (payload.items || []).forEach(function (item, index) {
     var day = (item.day || '').toString().trim();
     var periodId = (item.periodId || '').toString().trim();
     var title = (item.title || '').toString().trim();
     var location = (item.location || '').toString().trim();
 
-    if (!day || !periodId || !title) return;
+    Logger.log('Processing item ' + index + ': day="' + day + '", period="' + periodId + '", title="' + title + '"');
+    console.log('Processing item', index, ':', { day, periodId, title, location });
+
+    if (!day || !periodId || !title) {
+      Logger.log('Skipping item ' + index + ' - missing required fields');
+      console.log('Skipping item', index, 'due to missing required fields');
+      return;
+    }
 
     // Find matching dates in Days
     var matchedDays = days.filter(function (d) {
       if (d.Day !== day) return false;
       var dateObj = normalizeToDate(d.Date);
-      if (fromDate && dateObj < fromDate) return false;
-      if (toDate && dateObj > toDate) return false;
+      if (!dateObj) return false; // Skip invalid dates
+      
+      // Normalize the dateObj to start of day for comparison
+      var dateOnly = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate(), 0, 0, 0, 0);
+      
+      if (fromDate && dateOnly < fromDate) return false;
+      if (toDate && dateOnly > toDate) return false;
       return true;
     });
 
-    matchedDays.forEach(function (md) {
+    Logger.log('Item ' + index + ' matched ' + matchedDays.length + ' days in date range');
+    console.log('Item', index, 'matched days:', matchedDays.length);
+
+    matchedDays.forEach(function (md, mdIndex) {
       var key = [md.DayType, periodId].join('|');
       var ts = dayTimesMap[key];
-      if (!ts) return; // No time mapping
+      console.log('Matched day', mdIndex, 'key:', key, 'times:', ts);
+      if (!ts) {
+        console.log('No time mapping for key:', key);
+        return; // No time mapping
+      }
 
       var dateObj = normalizeToDate(md.Date); // ensure Date
       var minutesStart = minutesFromTime(ts.start);
@@ -410,6 +569,22 @@ function generatePreviewEvents(formData) {
     
   });
     
+  Logger.log('=== FINAL RESULTS ===');
+  Logger.log('Total results generated: ' + results.length);
+  console.log('Total results generated:', results.length);
+
+  // Create debug info to return with results for troubleshooting
+  var debugInfo = {
+    daysSheetFound: !!daysSheet,
+    daysCount: days.length,
+    daysSample: days.slice(0, 3),
+    dayTimesSheetFound: !!dtSheet,
+    dayTimesKeysCount: Object.keys(dayTimesMap).length,
+    dayTimesKeysSample: Object.keys(dayTimesMap).slice(0, 5),
+    payloadItems: payload.items,
+    dateRange: { fromDate: fromDate, toDate: toDate },
+    resultsCount: results.length
+  };
 
   // Sort by computed sort key (date + start minutes)
   results.sort(function (a, b) { return (a._sortKey || 0) - (b._sortKey || 0); });
@@ -419,7 +594,17 @@ function generatePreviewEvents(formData) {
     delete copy._sortKey;
     return copy;
   });
-  console.log('SerializableResults:', serializableResults);
+  console.log('SerializableResults:', serializableResults.length, 'events');
+  
+  // If no results, return debug info for troubleshooting
+  if (serializableResults.length === 0) {
+    return { 
+      events: serializableResults, 
+      debug: debugInfo,
+      message: 'No events generated. Check debug info for details.'
+    };
+  }
+  
   return serializableResults;
 }
 
@@ -468,12 +653,13 @@ function combineDateAndTime(dateOnly, timeCell, tz) {
 function normalizeToDate(value) {
   if (value instanceof Date) return value;
   if (typeof value === 'number') return new Date(Math.round(value));
-  if (typeof value === 'string') {
-    var d = new Date(value);
+  if (typeof value === 'string' && value.trim()) {
+    var d = new Date(value.trim());
     if (!isNaN(d.getTime())) return d;
   }
-  // default to today to avoid crashes
-  return new Date();
+  // For the Days sheet processing, return null for truly invalid dates
+  // For the date window processing, return a fallback
+  return null;
 }
 
 function formatRFC3339(dt, tz) {
@@ -560,7 +746,7 @@ function getOrCreateSchoogleSpreadsheet() {
   }
 
   // ensure JOBS sheet exists with header
-  var sh = ss.getSheetByName('JOBS');
+  var sh = ss.getSheetByName(SHEET_JOBS);
   if (!sh) sh = ss.insertSheet('JOBS');
   if (sh.getLastRow() === 0) {
     sh.getRange(1,1,1,18).setValues([[
@@ -570,7 +756,7 @@ function getOrCreateSchoogleSpreadsheet() {
     ]]);
   }
   // ensure Created Events sheet exists (central log of created events)
-  var ce = ss.getSheetByName('Created Events');
+  var ce = ss.getSheetByName(SHEET_CREATED_EVENTS);
   if (!ce) ce = ss.insertSheet('Created Events');
   if (ce.getLastRow() === 0) {
     ce.getRange(1,1,1,10).setValues([[
@@ -578,7 +764,7 @@ function getOrCreateSchoogleSpreadsheet() {
     ]]);
   }
   // ensure Job Log exists (used to avoid duplicate completion emails)
-  var jl = ss.getSheetByName('Job Log');
+  var jl = ss.getSheetByName(SHEET_JOB_LOG);
   if (!jl) jl = ss.insertSheet('Job Log');
   if (jl.getLastRow() === 0) {
     jl.getRange(1,1,1,5).setValues([[ 'jobId','timestamp','type','message','count' ]]);
@@ -588,7 +774,7 @@ function getOrCreateSchoogleSpreadsheet() {
 
 function getJobsSheetCentral_() {
   var sc = getOrCreateSchoogleSpreadsheet();
-  var sh = sc.ss.getSheetByName('JOBS');
+  var sh = sc.ss.getSheetByName(SHEET_JOBS);
   if (!sh) sh = sc.ss.insertSheet('JOBS');
   if (sh.getLastRow() === 0) {
     sh.getRange(1,1,1,18).setValues([[
@@ -665,7 +851,7 @@ function listUserJobEvents() {
 // Append a single created event to the central Created Events sheet
 function appendCreatedEventCentral_(ss, row) {
   try {
-    var ce = ss.getSheetByName('Created Events');
+    var ce = ss.getSheetByName(SHEET_CREATED_EVENTS);
     if (!ce) {
       ce = ss.insertSheet('Created Events');
       ce.getRange(1,1,1,10).setValues([[ 'Title','Start','End','Location','GoogleEventID','CalID','Day','Period','DayType','SchoogleEventID' ]]);
@@ -680,9 +866,9 @@ function appendCreatedEventCentral_(ss, row) {
 // Build "Class Sessions" sheet by grouping Created Events dates under each Title
 function rebuildClassSessionsFromCreated_(ss) {
   try {
-    var ce = ss.getSheetByName('Created Events');
+    var ce = ss.getSheetByName(SHEET_CREATED_EVENTS);
     if (!ce) return;
-    var cs = ss.getSheetByName('Class Sessions');
+    var cs = ss.getSheetByName(SHEET_CLASS_SESSIONS);
     if (cs) ss.deleteSheet(cs);
     cs = ss.insertSheet('Class Sessions');
     var last = ce.getLastRow();
@@ -713,7 +899,7 @@ function rebuildClassSessionsFromCreated_(ss) {
 
 function jobCompletionAlreadyLogged_(ss, jobId) {
   try {
-    var jl = ss.getSheetByName('Job Log');
+    var jl = ss.getSheetByName(SHEET_JOB_LOG);
     if (!jl) return false;
     var last = jl.getLastRow();
     if (last < 2) return false;
@@ -727,7 +913,7 @@ function jobCompletionAlreadyLogged_(ss, jobId) {
 
 function logJobCompleted_(ss, jobId, count) {
   try {
-    var jl = ss.getSheetByName('Job Log');
+    var jl = ss.getSheetByName(SHEET_JOB_LOG);
     if (!jl) {
       jl = ss.insertSheet('Job Log');
       jl.getRange(1,1,1,5).setValues([[ 'jobId','timestamp','type','message','count' ]]);
@@ -824,7 +1010,7 @@ function _removeUserWorkerTriggerIfIdle() {
 function readMetaFlag(spreadsheetId, key) {
   try {
     var ss = SpreadsheetApp.openById(spreadsheetId);
-    var meta = ss.getSheetByName('Meta');
+    var meta = ss.getSheetByName(SHEET_META);
     if (!meta) return null;
     var vals = meta.getRange(1,1,meta.getLastRow(),2).getValues();
     for (var i=0;i<vals.length;i++){
@@ -837,7 +1023,7 @@ function readMetaFlag(spreadsheetId, key) {
 function setMetaFlag(spreadsheetId, key, value) {
   try {
     var ss = SpreadsheetApp.openById(spreadsheetId);
-    var meta = ss.getSheetByName('Meta');
+    var meta = ss.getSheetByName(SHEET_META);
     if (!meta) meta = ss.insertSheet('Meta');
     var vals = meta.getRange(1,1,meta.getLastRow(),2).getValues();
     var found = false;
@@ -852,7 +1038,7 @@ function writeReportToSpreadsheet(spreadsheetId, reportData) {
   try {
     // overwrite Created Events sheet with reportData
     var ss = SpreadsheetApp.openById(spreadsheetId);
-    var sheet = ss.getSheetByName('Created Events');
+    var sheet = ss.getSheetByName(SHEET_CREATED_EVENTS);
     if (!sheet) sheet = ss.insertSheet('Created Events');
     // clear except header
     var last = sheet.getLastRow();
@@ -865,7 +1051,7 @@ function writeReportToSpreadsheet(spreadsheetId, reportData) {
     try { setMetaFlag(spreadsheetId, 'reportUrl', ss.getUrl()); } catch (e) { /* ignore */ }
     // Also create a "Class Sessions" sheet grouping events by Title into columns
     try {
-      var cs = ss.getSheetByName('Class Sessions');
+      var cs = ss.getSheetByName(SHEET_CLASS_SESSIONS);
       if (cs) {
         // remove existing data
         ss.deleteSheet(cs);
@@ -1170,8 +1356,10 @@ function getEventsFromCalendar(calendarId) {
         end: endDT,
         location: ev.location || '',
         htmlLink: ev.htmlLink || '',
+        colorId: ev.colorId || '1',
+        attendees: ev.attendees || [],
         schoogle: ev.extendedProperties && ev.extendedProperties.private && ev.extendedProperties.private.Schoogle === 'true',
-        schoogleEventId: ev.extendedProperties && ev.extendedProperties.private && ev.extendedProperties.private.SchoogleEventID
+        schoogleEventId: ev.extendedProperties && ev.extendedProperties.private && ev.extendedProperties.private.schoogleEventId
       });
     });
     pageToken = resp.nextPageToken;
@@ -1193,6 +1381,110 @@ function getEventsFromCalendar(calendarId) {
 function updateCalendarEvent(calendarId, eventId, newTitle) {
   var updated = Calendar.Events.patch({ summary: newTitle }, calendarId, eventId);
   return { success: true, id: updated.id, title: updated.summary };
+}
+
+// Update a calendar event with comprehensive data
+function updateCalendarEventFull(calendarId, eventId, updates) {
+  var patchData = {};
+  
+  if (updates.title) patchData.summary = updates.title;
+  if (updates.colorId) patchData.colorId = updates.colorId;
+  if (updates.location) patchData.location = updates.location;
+  
+  // Handle date/time updates
+  if (updates.startDate && updates.startTime) {
+    patchData.start = { 
+      dateTime: new Date(updates.startDate + 'T' + updates.startTime + ':00').toISOString(),
+      timeZone: Session.getScriptTimeZone()
+    };
+  } else if (updates.startDate) {
+    patchData.start = { date: updates.startDate };
+  }
+  
+  if (updates.endDate && updates.endTime) {
+    patchData.end = { 
+      dateTime: new Date(updates.endDate + 'T' + updates.endTime + ':00').toISOString(),
+      timeZone: Session.getScriptTimeZone()
+    };
+  } else if (updates.endDate) {
+    patchData.end = { date: updates.endDate };
+  }
+  
+  // Handle invitation emails
+  if (updates.inviteEmails !== undefined) {
+    if (updates.inviteEmails && Array.isArray(updates.inviteEmails) && updates.inviteEmails.length > 0) {
+      patchData.attendees = updates.inviteEmails.map(function(email) {
+        return { email: email.trim(), responseStatus: 'needsAction' };
+      });
+    } else {
+      // Clear attendees if inviteEmails is null, empty, or not an array
+      patchData.attendees = [];
+    }
+  }
+  
+  // Handle SchoogleEventId as extended property
+  if (updates.schoogleEventId !== undefined) {
+    if (!patchData.extendedProperties) patchData.extendedProperties = {};
+    if (!patchData.extendedProperties.private) patchData.extendedProperties.private = {};
+    patchData.extendedProperties.private.schoogleEventId = updates.schoogleEventId || '';
+  }
+  
+  var updated = Calendar.Events.patch(patchData, calendarId, eventId);
+  return { success: true, id: updated.id, title: updated.summary };
+}
+
+// Update multiple events' titles by their IDs
+function updateEventTitlesByIds(calendarId, ids, newTitle) {
+  var out = { updated: 0, errors: [] };
+  if (!calendarId) calendarId = 'primary';
+  (ids || []).forEach(function(id) {
+    try {
+      Calendar.Events.patch({ summary: newTitle }, calendarId, id);
+      out.updated += 1;
+    } catch (e) {
+      out.errors.push({ id: id, message: e && e.message ? e.message : (e + '') });
+    }
+  });
+  return out;
+}
+
+// Update multiple events' colors by their IDs
+function updateEventColorsByIds(calendarId, ids, colorId) {
+  var out = { updated: 0, errors: [] };
+  if (!calendarId) calendarId = 'primary';
+  (ids || []).forEach(function(id) {
+    try {
+      Calendar.Events.patch({ colorId: colorId }, calendarId, id);
+      out.updated += 1;
+    } catch (e) {
+      out.errors.push({ id: id, message: e && e.message ? e.message : (e + '') });
+    }
+  });
+  return out;
+}
+
+// Update multiple events' invitations by their IDs
+function updateEventInvitesByIds(calendarId, ids, emails) {
+  var out = { updated: 0, errors: [] };
+  if (!calendarId) calendarId = 'primary';
+  
+  // Prepare attendees array
+  var attendees = [];
+  if (emails && Array.isArray(emails) && emails.length > 0) {
+    attendees = emails.map(function(email) {
+      return { email: email.trim(), responseStatus: 'needsAction' };
+    });
+  }
+  
+  (ids || []).forEach(function(id) {
+    try {
+      Calendar.Events.patch({ attendees: attendees }, calendarId, id);
+      out.updated += 1;
+    } catch (e) {
+      out.errors.push({ id: id, message: e && e.message ? e.message : (e + '') });
+    }
+  });
+  return out;
 }
 
 function deleteCalendarEvent(calendarId, eventId) {
@@ -1254,5 +1546,56 @@ function deleteEventsByIds(calendarId, ids) {
       out.errors.push({ id: id, message: e && e.message ? e.message : (e + '') });
     }
   });
+  return out;
+}
+
+// Get Schoogle events from a calendar within a date range
+function getEventsFromCalendarInRange(calendarId, fromDate, toDate) {
+  var out = [];
+  var tz = Session.getScriptTimeZone() || 'Asia/Hong_Kong';
+  var params = {
+    privateExtendedProperty: 'Schoogle=true',
+    maxResults: 2500,
+    singleEvents: true,
+    orderBy: 'startTime'
+  };
+  if (fromDate) {
+    var fd = normalizeToDate(fromDate);
+    if (fd) {
+      fd = new Date(fd.getFullYear(), fd.getMonth(), fd.getDate(), 0, 0, 0, 0);
+      params.timeMin = formatRFC3339(fd, tz);
+    }
+  }
+  if (toDate) {
+    var td = normalizeToDate(toDate);
+    if (td) {
+      td = new Date(td.getFullYear(), td.getMonth(), td.getDate(), 23, 59, 59, 999);
+      params.timeMax = formatRFC3339(td, tz);
+    }
+  }
+  try {
+    var pageToken;
+    do {
+      if (pageToken) params.pageToken = pageToken;
+      var resp = Calendar.Events.list(calendarId, params);
+      var items = (resp && resp.items) || [];
+      items.forEach(function(ev) {
+        var startDT = ev.start && (ev.start.dateTime || ev.start.date);
+        var endDT = ev.end && (ev.end.dateTime || ev.end.date);
+        out.push({
+          id: ev.id,
+          title: ev.summary || '',
+          start: startDT,
+          end: endDT,
+          location: ev.location || '',
+          htmlLink: ev.htmlLink || '',
+          schoogleEventId: (ev.extendedProperties && ev.extendedProperties['private'] && ev.extendedProperties['private'].SchoogleEventID) || ''
+        });
+      });
+      pageToken = resp.nextPageToken;
+    } while (pageToken);
+  } catch (e) {
+    return out;
+  }
   return out;
 }

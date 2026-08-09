@@ -1,6 +1,7 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
   <head>
+    <meta charset="UTF-8" />
     <base target="_top">
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Schoogle</title>
@@ -15,24 +16,74 @@
 
       <nav class="tabs">
         <button class="tab-btn active" data-tab="addTab">Add</button>
+        <button class="tab-btn" data-tab="updateTab">Update</button>
         <button class="tab-btn" data-tab="viewTab">View</button>
   <button class="tab-btn" data-tab="jobsTab">Active Jobs <span id="jobsNotificationCount" class="notification-count">0</span></button>
       </nav>
 
       <main>
         <section id="addTab" class="tab-content active">
+          <div class="flow-stepper" id="addStepper">
+            <div class="step active" data-step="1">
+              <span class="step-number">1</span>
+              <span class="step-text">Load timetable</span>
+            </div>
+            <div class="step" data-step="2">
+              <span class="step-number">2</span>
+              <span class="step-text">Preview and edit</span>
+            </div>
+            <div class="step" data-step="3">
+              <span class="step-number">3</span>
+              <span class="step-text">Create and monitor</span>
+            </div>
+          </div>
+
+          <div class="onboarding-panel">
+            <h3 id="welcomeHeading">Hello!</h3>
+            <p class="section-instructions">Start by loading a timetable source, then preview events before creating them in Google Calendar.</p>
+            <div id="addStatusMessage" class="status-message" style="display:none;"></div>
+          </div>
+
           <div id="formSection">
-            <div class="section-instructions">Enter rows for your timetable (day, period, title, location). When ready, pick a date window and click "Preview Events" to review before creating.</div>
+            <div class="section-instructions">Step 1: Load timetable rows (or enter rows manually). Step 2: Choose date window and preview events.</div>
+            <div class="source-grid" style="margin-bottom:10px;">
+              <div class="source-item">
+                <label>My timetable</label>
+                <button id="loadMyTimetableBtn" class="btn mini primary">Load my timetable</button>
+              </div>
+              <div class="source-item">
+                <label for="otherTeacherSelect">Teacher timetable</label>
+                <div class="source-actions">
+                  <select id="otherTeacherSelect" style="min-width:260px;"></select>
+                  <button id="loadOtherBtn" class="btn mini">Load teacher</button>
+                </div>
+              </div>
+              <div class="source-item">
+                <label for="classSelect">Class timetable</label>
+                <div class="source-actions">
+                  <select id="classSelect" style="min-width:260px;"></select>
+                  <button id="loadClassBtn" class="btn mini">Load class</button>
+                </div>
+              </div>
+              <div class="source-item">
+                <label for="roomSelect">Room timetable</label>
+                <div class="source-actions">
+                  <select id="roomSelect" style="min-width:260px;"></select>
+                  <button id="loadRoomBtn" class="btn mini">Load room</button>
+                </div>
+              </div>
+            </div>
             <div class="form-rows" id="formRows">
               <div class="form-row header">
+                  <label data-sort-key="title">Title</label>
                   <label data-sort-key="day">Day</label>
                   <label data-sort-key="periodId">Period</label>
-                  <label data-sort-key="title">Title</label>
                   <label data-sort-key="location">Location</label>
                 <label>Actions</label>
               </div>
               <!-- Template Row (hidden) -->
               <div class="form-row" id="rowTemplate" data-template="true" style="display:none;">
+                <input class="title-input" type="text" placeholder="Class Title" />
                 <select class="day-select">
                   <option value="">Select Day</option>
                   <option>Day 1</option>
@@ -49,40 +100,28 @@
                 <select class="period-select">
                   <option value="">Select Period</option>
                 </select>
-                <input class="title-input" type="text" placeholder="Class Title" />
                 <input class="location-input" type="text" placeholder="Location" />
                 <div class="row-actions">
                   <button type="button" class="btn danger mini delete-row-btn">Delete</button>
                 </div>
               </div>
             </div>
-            <div class="calendar-picker" style="margin-top:8px;">
-              <label>Date window</label>
-              <input id="fromDate" type="date" />
-              <span style="color:#9ca3af;">to</span>
-              <input id="toDate" type="date" />
-            </div>
             <div class="controls">
               <button id="addRowBtn" class="btn icon">＋</button>
-              <button id="previewBtn" class="btn primary">Preview Events</button>
             </div>
-            <div style="margin-top:10px;">
-              <button id="showLoadOtherBtn" class="btn mini">Load other timetable</button>
-              <div id="otherLoadWrap" style="display:none; margin-top:8px;">
-                <select id="otherTeacherSelect" style="min-width:320px;"></select>
-                <button id="loadOtherBtn" class="btn mini" style="margin-left:8px;">Load other timetable</button>
-              </div>
-              
-              <button id="showLoadClassesBtn" class="btn mini" style="margin-left:8px;">Load other classes</button>
-              <div id="classLoadWrap" style="display:none; margin-top:8px;">
-                <select id="classSelect" style="min-width:320px;"></select>
-                <button id="loadClassBtn" class="btn mini" style="margin-left:8px;">Load other classes</button>
-              </div>
+            <div class="calendar-picker" style="margin-top:8px;">
+              <label>Date window</label>
+              <input id="fromDate" type="date" aria-label="From date" title="From date" />
+              <span style="color:#9ca3af;">to</span>
+              <input id="toDate" type="date" aria-label="To date" title="To date" />
+            </div>
+            <div class="controls">
+              <button id="previewBtn" class="btn primary">Preview Events</button>
             </div>
           </div>
 
           <div id="previewSection" style="display:none;">
-            <div class="section-instructions">Review generated events below. You can edit dates/times inline, delete individual items, then choose a target calendar and click "Create Events" to enqueue the job.</div>
+            <div class="section-instructions">Step 2: Review generated events and edit if needed. Step 3: Select target calendar and create events.</div>
             <div id="previewMeta" class="preview-meta"></div>
             <div id="previewList" class="collapsible-list"></div>
             <div class="calendar-picker" style="margin-top:10px;">
@@ -90,6 +129,11 @@
               <select id="calendarSelect"></select>
               <input id="newCalendarName" type="text" placeholder="New calendar name" style="display:none;" />
             </div>
+            <details class="helper-card">
+              <summary>How to create a new calendar</summary>
+              <p>Select "+ Create new calendar..." from Target calendar, enter a name, then click Create Events. Schoogle will create the calendar first, then queue events into it.</p>
+              <p>When done, you will see confirmation in this tab and job progress in Active Jobs.</p>
+            </details>
             <div class="controls">
               <button id="backToFormBtn" class="btn">Back to form</button>
               <button id="createBtn" class="btn success">Create Events</button>
@@ -98,8 +142,113 @@
           </div>
         </section>
 
+        <section id="updateTab" class="tab-content">
+          <div class="flow-stepper" id="updateStepper">
+            <div class="step active" data-step="1">
+              <span class="step-number">1</span>
+              <span class="step-text">Load and select</span>
+            </div>
+            <div class="step" data-step="2">
+              <span class="step-number">2</span>
+              <span class="step-text">Compare changes</span>
+            </div>
+            <div class="step" data-step="3">
+              <span class="step-number">3</span>
+              <span class="step-text">Apply updates</span>
+            </div>
+          </div>
+          <div class="section-instructions">Compare existing calendar events with freshly generated timetable events. Delete outdated events and create new ones to keep your calendar up to date.</div>
+          <div id="updateStatusMessage" class="status-message" style="display:none;"></div>
+
+          <div id="updateFormSection">
+            <div class="calendar-picker">
+              <label for="updateCalendarSelect">Schoogle Calendar</label>
+              <select id="updateCalendarSelect"></select>
+            </div>
+
+            <div class="form-rows" id="updateFormRows">
+              <div class="form-row header">
+                <label data-sort-key="title">Title</label>
+                <label data-sort-key="day">Day</label>
+                <label data-sort-key="periodId">Period</label>
+                <label data-sort-key="location">Location</label>
+                <label>Actions</label>
+              </div>
+              <div class="form-row" id="updateRowTemplate" data-template="true" style="display:none;">
+                <input class="title-input" type="text" placeholder="Class Title" />
+                <select class="day-select">
+                  <option value="">Select Day</option>
+                  <option>Day 1</option><option>Day 2</option><option>Day 3</option><option>Day 4</option><option>Day 5</option>
+                  <option>Day 6</option><option>Day 7</option><option>Day 8</option><option>Day 9</option><option>Day 10</option>
+                </select>
+                <select class="period-select"><option value="">Select Period</option></select>
+                <input class="location-input" type="text" placeholder="Location" />
+                <div class="row-actions"><button type="button" class="btn danger mini delete-row-btn">Delete</button></div>
+              </div>
+            </div>
+
+            <div class="controls">
+              <button id="updateAddRowBtn" class="btn icon">＋</button>
+            </div>
+
+            <div class="source-grid" style="margin-top:10px;">
+              <div class="source-item">
+                <label>My timetable</label>
+                <button id="updateLoadMyTimetableBtn" class="btn mini primary">Load my timetable</button>
+              </div>
+              <div class="source-item">
+                <label for="updateOtherTeacherSelect">Teacher timetable</label>
+                <div class="source-actions">
+                  <select id="updateOtherTeacherSelect" style="min-width:260px;"></select>
+                  <button id="updateLoadOtherBtn" class="btn mini">Load teacher</button>
+                </div>
+              </div>
+              <div class="source-item">
+                <label for="updateClassSelect">Class timetable</label>
+                <div class="source-actions">
+                  <select id="updateClassSelect" style="min-width:260px;"></select>
+                  <button id="updateLoadClassBtn" class="btn mini">Load class</button>
+                </div>
+              </div>
+              <div class="source-item">
+                <label for="updateRoomSelect">Room timetable</label>
+                <div class="source-actions">
+                  <select id="updateRoomSelect" style="min-width:260px;"></select>
+                  <button id="updateLoadRoomBtn" class="btn mini">Load room</button>
+                </div>
+              </div>
+            </div>
+            <div class="calendar-picker" style="margin-top:8px;">
+              <label>Date window</label>
+              <input id="updateFromDate" type="date" aria-label="Update from date" title="Update from date" />
+              <span style="color:#9ca3af;">to</span>
+              <input id="updateToDate" type="date" aria-label="Update to date" title="Update to date" />
+            </div>
+
+            <div class="controls">
+              <button id="updatePreviewBtn" class="btn primary">Preview Events</button>
+            </div>
+          </div>
+
+          <div id="updateCompareSection" style="display:none;">
+            <div id="updateCompareMeta" class="preview-meta"></div>
+            <div class="controls" style="margin-bottom:12px;">
+              <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                <input type="checkbox" id="updateSelectAll" checked />
+                Select / Deselect All
+              </label>
+              <button id="updateDeleteCreateAllBtn" class="btn danger">Delete and Create All</button>
+            </div>
+            <div id="updateMatchedSection" class="collapsible-list"></div>
+            <div id="updateUnmatchedSection"></div>
+            <div class="controls" style="margin-top:12px;">
+              <button id="updateBackBtn" class="btn">Back to form</button>
+            </div>
+          </div>
+        </section>
+
         <section id="viewTab" class="tab-content">
-          <div class="section-instructions">Select a calendar to list Schoogle-created events. Use the edit or delete buttons to adjust events. Group-level delete shows a confirmation list so you can pick which instances to remove.</div>
+          <div class="section-instructions">Select a calendar to list Schoogle-created events. Use the individual edit or delete buttons to adjust single events. At the group level, you can batch edit titles, change colors, or delete multiple events at once with confirmation dialogs.</div>
           <div class="calendar-picker">
             <label for="viewCalendarSelect">Calendar</label>
             <select id="viewCalendarSelect"></select>
@@ -167,6 +316,8 @@
         </div>
       </div>
     </div>
+
+    <footer class="site-footer">Made with love by achiu@vsa.edu.hk / Tech Innovation Department</footer>
 
     <?!= include('JavaScript'); ?>
   </body>

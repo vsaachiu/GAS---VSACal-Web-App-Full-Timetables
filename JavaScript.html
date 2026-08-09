@@ -4,6 +4,9 @@
     periods: [],
     previewEvents: [],
     calendars: [],
+    userEmail: '',
+    updateDefaultLoaded: false,
+    updateDefaultLoadPending: false,
   };
 
   // Toggle to disable summarization and log full RPC payloads (set true while debugging)
@@ -260,12 +263,13 @@
       // Removed automatic tab switch to View tab
       // Optionally reload events for the relevant calendar
       try {
-        state.previewEvents = [];
-        const previewContainer = document.getElementById('previewContainer');
-        if (previewContainer) previewContainer.innerHTML = '';
+        // REMOVED: Job polling should NOT touch state.previewEvents
+        // Preview events should only be managed by the Add tab Preview/Create workflow
+        // state.previewEvents = []; // REMOVED - This was causing preview events to disappear
+        // const previewContainer = document.getElementById('previewContainer'); // REMOVED
+        // if (previewContainer) previewContainer.innerHTML = ''; // REMOVED
         try { document.getElementById('createBtn').disabled = false; } catch (e) {}
-        try { document.getElementById('fromDate').value = ''; } catch (e) {}
-        try { document.getElementById('toDate').value = ''; } catch (e) {}
+        // Don't clear date fields - they should persist for next use
       } catch (e) { /* ignore UI errors */ }
     }
   }
@@ -370,6 +374,99 @@
   console.debug('Spinner', { show });
   }
 
+  function showInlineStatus(targetId, message, type) {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    el.style.display = message ? '' : 'none';
+    el.className = 'status-message' + (type ? ' ' + type : '');
+    el.textContent = message || '';
+  }
+
+  function displayNameFromEmail(email) {
+    const raw = (email || '').toString().trim();
+    if (!raw) return 'Teacher';
+    const local = raw.split('@')[0] || raw;
+    return local.charAt(0).toUpperCase() + local.slice(1);
+  }
+
+  function updateWelcomeHeading() {
+    const el = document.getElementById('welcomeHeading');
+    if (!el) return;
+    const label = displayNameFromEmail(state.userEmail);
+    el.textContent = 'Hello, ' + label + '!';
+  }
+
+  function setStepperProgress(stepperId, activeStep) {
+    const root = document.getElementById(stepperId);
+    if (!root) return;
+    const current = Number(activeStep || 1);
+    root.querySelectorAll('.step').forEach(step => {
+      const stepNum = Number(step.getAttribute('data-step') || '1');
+      step.classList.toggle('active', stepNum === current);
+      step.classList.toggle('done', stepNum < current);
+    });
+  }
+
+  function addDefaultOption(selectEl, text) {
+    if (!selectEl) return;
+    if (!selectEl.options.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = text;
+      selectEl.appendChild(opt);
+    }
+  }
+
+  function populateTeacherSelect(selectEl, list) {
+    if (!selectEl) return;
+    selectEl.innerHTML = '';
+    addDefaultOption(selectEl, '-- Select teacher --');
+    (list || []).forEach(t => {
+      const o = document.createElement('option');
+      o.value = t.email;
+      o.textContent = t.name || t.email;
+      selectEl.appendChild(o);
+    });
+  }
+
+  function populateTextSelect(selectEl, list, defaultText) {
+    if (!selectEl) return;
+    selectEl.innerHTML = '';
+    addDefaultOption(selectEl, defaultText);
+    (list || []).forEach(item => {
+      const o = document.createElement('option');
+      o.value = item;
+      o.textContent = item;
+      selectEl.appendChild(o);
+    });
+  }
+
+  function hydrateSourceSelectors() {
+    const teacherTargets = [
+      document.getElementById('otherTeacherSelect'),
+      document.getElementById('updateOtherTeacherSelect')
+    ];
+    const classTargets = [
+      document.getElementById('classSelect'),
+      document.getElementById('updateClassSelect')
+    ];
+    const roomTargets = [
+      document.getElementById('roomSelect'),
+      document.getElementById('updateRoomSelect')
+    ];
+
+    showSpinner(true);
+    Promise.all([
+      rpc('getTeachers').catch(() => []),
+      rpc('getClasses').catch(() => []),
+      rpc('getRooms').catch(() => [])
+    ]).then(([teachers, classes, rooms]) => {
+      teacherTargets.forEach(sel => populateTeacherSelect(sel, teachers));
+      classTargets.forEach(sel => populateTextSelect(sel, classes, '-- Select class --'));
+      roomTargets.forEach(sel => populateTextSelect(sel, rooms, '-- Select room --'));
+    }).finally(() => showSpinner(false));
+  }
+
   function switchTab(tabId) {
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabId));
     document.querySelectorAll('.tab-content').forEach(el => el.classList.toggle('active', el.id === tabId));
@@ -378,8 +475,18 @@
     try {
       if (tabId === 'jobsTab') {
         startJobsPoller();
+      } else if (tabId === 'updateTab') {
+        stopJobsPoller();
       } else {
         stopJobsPoller();
+      }
+      if (tabId === 'addTab') {
+        const inPreview = document.getElementById('previewSection').style.display !== 'none';
+        setStepperProgress('addStepper', inPreview ? 2 : 1);
+      }
+      if (tabId === 'updateTab') {
+        const inCompare = document.getElementById('updateCompareSection').style.display !== 'none';
+        setStepperProgress('updateStepper', inCompare ? 2 : 1);
       }
     } catch (e) { /* ignore */ }
   }
@@ -532,6 +639,456 @@
     return groups;
   }
 
+  // ===== UPDATE TAB HELPERS =====
+
+  function addUpdateRow(prefill) {
+    const template = document.getElementById('updateRowTemplate');
+    const row = template.cloneNode(true);
+    row.removeAttribute('id');
+    row.removeAttribute('data-template');
+    row.style.display = '';
+    const periodSelect = row.querySelector('.period-select');
+    periodSelect.innerHTML = '<option value="">Select Period</option>' + state.periods.map(p => '<option value="' + p.id + '">' + p.text + '</option>').join('');
+    if (prefill) {
+      if (prefill.day) row.querySelector('.day-select').value = prefill.day;
+      if (prefill.periodId) periodSelect.value = prefill.periodId;
+      if (prefill.title) row.querySelector('.title-input').value = prefill.title;
+      if (prefill.location) row.querySelector('.location-input').value = prefill.location;
+    }
+    const delBtn = row.querySelector('.delete-row-btn');
+    if (delBtn) delBtn.addEventListener('click', () => row.remove());
+    document.getElementById('updateFormRows').appendChild(row);
+  }
+
+  function collectUpdateFormData() {
+    const rows = Array.from(document.querySelectorAll('#updateFormRows .form-row'))
+      .filter(r => !r.dataset.template && !r.classList.contains('header'));
+    return rows.map(r => ({
+      day: (r.querySelector('.day-select') || {}).value || '',
+      periodId: (r.querySelector('.period-select') || {}).value || '',
+      title: (r.querySelector('.title-input') || {}).value || '',
+      location: (r.querySelector('.location-input') || {}).value || ''
+    })).filter(x => x.day && x.periodId && x.title);
+  }
+
+  function compareEvents(existingEvents, previewEvents) {
+    const existingBySeId = {};
+    existingEvents.forEach(ev => {
+      var seId = ev.schoogleEventId;
+      if (seId) {
+        if (!existingBySeId[seId]) existingBySeId[seId] = [];
+        existingBySeId[seId].push(ev);
+      }
+    });
+    const matched = [], mismatched = [], newPreview = [];
+    const usedExistingIds = new Set();
+    previewEvents.forEach(pev => {
+      var seId = pev.schoogleEventId;
+      var existingList = seId ? existingBySeId[seId] : null;
+      if (existingList && existingList.length > 0) {
+        var existing = existingList.shift();
+        usedExistingIds.add(existing.id);
+        if (eventsDetailMatch(existing, pev)) {
+          matched.push({ existing: existing, preview: pev });
+        } else {
+          mismatched.push({ existing: existing, preview: pev });
+        }
+      } else {
+        newPreview.push(pev);
+      }
+    });
+    var orphanedExisting = existingEvents.filter(ev => !usedExistingIds.has(ev.id));
+    return { matched: matched, mismatched: mismatched, orphanedExisting: orphanedExisting, newPreview: newPreview };
+  }
+
+  function eventsDetailMatch(existing, preview) {
+    if ((existing.title || '').trim() !== (preview.title || '').trim()) return false;
+    if ((existing.location || '').trim() !== (preview.location || '').trim()) return false;
+    try {
+      var eStart = new Date(existing.start);
+      var pStart = new Date(preview.startDate + 'T' + preview.startTime + ':00');
+      if (Math.abs(eStart.getTime() - pStart.getTime()) > 60000) return false;
+      var eEnd = new Date(existing.end);
+      var pEnd = new Date(preview.startDate + 'T' + preview.endTime + ':00');
+      if (Math.abs(eEnd.getTime() - pEnd.getTime()) > 60000) return false;
+    } catch (e) { return false; }
+    return true;
+  }
+
+  function createEventCard(ev, type) {
+    var card = document.createElement('div');
+    card.className = 'update-event-card ' + (type === 'existing' ? 'update-card-existing' : 'update-card-preview');
+    var titleEl = document.createElement('div');
+    titleEl.style.fontWeight = '600';
+    titleEl.style.marginBottom = '4px';
+    titleEl.textContent = ev.title || '(Untitled)';
+    var timeEl = document.createElement('div');
+    timeEl.style.fontSize = '13px';
+    timeEl.style.color = 'var(--muted)';
+    if (type === 'existing') {
+      timeEl.textContent = fmt(ev.start) + ' \u2192 ' + fmt(ev.end);
+    } else {
+      timeEl.textContent = ev.startDate + ' ' + ev.startTime + ' \u2192 ' + ev.endTime;
+    }
+    card.appendChild(titleEl);
+    card.appendChild(timeEl);
+    if (ev.location) {
+      var locEl = document.createElement('div');
+      locEl.style.fontSize = '12px';
+      locEl.style.color = 'var(--muted)';
+      locEl.textContent = '\uD83D\uDCCD ' + ev.location;
+      card.appendChild(locEl);
+    }
+    if (ev.schoogleEventId) {
+      var seIdEl = document.createElement('div');
+      seIdEl.style.fontSize = '11px';
+      seIdEl.style.color = 'var(--muted)';
+      seIdEl.style.fontFamily = 'monospace';
+      seIdEl.style.marginTop = '4px';
+      seIdEl.textContent = 'ID: ' + ev.schoogleEventId;
+      card.appendChild(seIdEl);
+    }
+    return card;
+  }
+
+  function renderUpdateComparison(comparison) {
+    var matchedSection = document.getElementById('updateMatchedSection');
+    var unmatchedSection = document.getElementById('updateUnmatchedSection');
+    var meta = document.getElementById('updateCompareMeta');
+    matchedSection.innerHTML = '';
+    unmatchedSection.innerHTML = '';
+    var totalChanges = comparison.mismatched.length + comparison.orphanedExisting.length + comparison.newPreview.length;
+    meta.textContent = 'Matched: ' + comparison.matched.length + ' | Changes needed: ' + totalChanges +
+      ' (Mismatched: ' + comparison.mismatched.length + ', To delete: ' + comparison.orphanedExisting.length + ', To create: ' + comparison.newPreview.length + ')';
+
+    // Render matched events (collapsed)
+    if (comparison.matched.length > 0) {
+      var details = document.createElement('details');
+      var summary = document.createElement('summary');
+      summary.textContent = '\u2713 ' + comparison.matched.length + ' events match \u2014 no changes needed';
+      details.appendChild(summary);
+      var ul = document.createElement('ul');
+      ul.className = 'event-list';
+      ul.style.listStyle = 'none';
+      ul.style.padding = '10px 12px';
+      comparison.matched.forEach(function(m) {
+        var li = document.createElement('li');
+        li.style.padding = '4px 0';
+        li.style.color = 'var(--muted)';
+        li.style.fontSize = '13px';
+        li.textContent = m.preview.title + ' \u2014 ' + m.preview.startDate + ' ' + m.preview.startTime + '\u2013' + m.preview.endTime + (m.preview.location ? ' @ ' + m.preview.location : '');
+        ul.appendChild(li);
+      });
+      details.appendChild(ul);
+      matchedSection.appendChild(details);
+    }
+
+    // Build unified chronological list of changes
+    var changes = [];
+    comparison.mismatched.forEach(function(m, i) {
+      changes.push({ sortKey: new Date(m.preview.startDate + 'T' + m.preview.startTime + ':00').getTime(), type: 'mismatched', index: i, existing: m.existing, preview: m.preview });
+    });
+    comparison.orphanedExisting.forEach(function(ev, i) {
+      changes.push({ sortKey: new Date(ev.start).getTime(), type: 'orphaned', index: i, existing: ev, preview: null });
+    });
+    comparison.newPreview.forEach(function(ev, i) {
+      changes.push({ sortKey: new Date(ev.startDate + 'T' + ev.startTime + ':00').getTime(), type: 'new', index: i, existing: null, preview: ev });
+    });
+    changes.sort(function(a, b) { return (a.sortKey || 0) - (b.sortKey || 0); });
+
+    if (changes.length === 0) {
+      unmatchedSection.innerHTML = '<div style="padding:16px; color:var(--success); text-align:center;">All events match! No updates needed.</div>';
+      document.getElementById('updateDeleteCreateAllBtn').style.display = 'none';
+      document.getElementById('updateSelectAll').parentElement.style.display = 'none';
+      return;
+    }
+
+    document.getElementById('updateDeleteCreateAllBtn').style.display = '';
+    document.getElementById('updateSelectAll').parentElement.style.display = '';
+
+    // Column headers
+    var headerRow = document.createElement('div');
+    headerRow.className = 'update-col-header';
+    headerRow.innerHTML = '<span>Existing Events</span><span>Preview Events</span><span>Actions</span>';
+    unmatchedSection.appendChild(headerRow);
+
+    // Render changes
+    changes.forEach(function(change) {
+      var row = document.createElement('div');
+      row.className = 'update-comparison-row';
+      var leftCol = document.createElement('div');
+      leftCol.className = 'update-col update-col-existing';
+      var rightCol = document.createElement('div');
+      rightCol.className = 'update-col update-col-preview';
+      var actionsCol = document.createElement('div');
+      actionsCol.className = 'update-col update-col-actions';
+
+      if (change.type === 'mismatched') {
+        leftCol.appendChild(createEventCard(change.existing, 'existing'));
+        rightCol.appendChild(createEventCard(change.preview, 'preview'));
+        var cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.className = 'update-item-check'; cb.checked = true;
+        cb.dataset.type = 'mismatched'; cb.dataset.index = change.index;
+        var btn = document.createElement('button');
+        btn.className = 'btn danger mini'; btn.textContent = 'Delete & Update'; btn.style.marginTop = '4px';
+        btn.addEventListener('click', function() {
+          if (!confirm('Delete existing event and create new version?')) return;
+          var calId = state.updateCalendarId;
+          var pev = change.preview;
+          var copy = Object.assign({}, pev);
+          try { copy.startDateTime = new Date(copy.startDate + 'T' + copy.startTime + ':00').toISOString(); } catch(e) {}
+          try { copy.endDateTime = new Date(copy.startDate + 'T' + copy.endTime + ':00').toISOString(); } catch(e) {}
+          showSpinner(true);
+          rpc('deleteEventsByIds', calId, [change.existing.id])
+            .then(function() { return rpc('ensureUserWorkerTrigger'); })
+            .then(function() { return rpc('enqueueJob', [copy], calId); })
+            .then(function(jobId) {
+              row.style.opacity = '0.3'; btn.disabled = true; cb.disabled = true;
+              alert('Deleted & queued new event (Job: ' + jobId + ').');
+              try { startJobsPoller(); } catch(e) {}
+              try { rpc('processUserJobs').catch(function(){}); } catch(e) {}
+            })
+            .catch(function(err) { alert('Failed: ' + (err && err.message ? err.message : err)); })
+            .finally(function() { showSpinner(false); });
+        });
+        actionsCol.appendChild(cb);
+        actionsCol.appendChild(document.createElement('br'));
+        actionsCol.appendChild(btn);
+      } else if (change.type === 'orphaned') {
+        leftCol.appendChild(createEventCard(change.existing, 'existing'));
+        rightCol.innerHTML = '<div class="update-empty-slot">No matching preview event</div>';
+        var cb2 = document.createElement('input');
+        cb2.type = 'checkbox'; cb2.className = 'update-item-check'; cb2.checked = true;
+        cb2.dataset.type = 'orphaned'; cb2.dataset.index = change.index;
+        var delBtn = document.createElement('button');
+        delBtn.className = 'btn danger mini'; delBtn.textContent = 'Delete'; delBtn.style.marginTop = '4px';
+        delBtn.addEventListener('click', function() {
+          if (!confirm('Delete this existing event?')) return;
+          showSpinner(true);
+          rpc('deleteEventsByIds', state.updateCalendarId, [change.existing.id])
+            .then(function() { row.style.opacity = '0.3'; delBtn.disabled = true; cb2.disabled = true; alert('Event deleted.'); })
+            .catch(function(err) { alert('Failed: ' + (err && err.message ? err.message : err)); })
+            .finally(function() { showSpinner(false); });
+        });
+        actionsCol.appendChild(cb2);
+        actionsCol.appendChild(document.createElement('br'));
+        actionsCol.appendChild(delBtn);
+      } else if (change.type === 'new') {
+        leftCol.innerHTML = '<div class="update-empty-slot">No matching existing event</div>';
+        rightCol.appendChild(createEventCard(change.preview, 'preview'));
+        var cb3 = document.createElement('input');
+        cb3.type = 'checkbox'; cb3.className = 'update-item-check'; cb3.checked = true;
+        cb3.dataset.type = 'new'; cb3.dataset.index = change.index;
+        var createBtn = document.createElement('button');
+        createBtn.className = 'btn success mini'; createBtn.textContent = 'Create'; createBtn.style.marginTop = '4px';
+        createBtn.addEventListener('click', function() {
+          if (!confirm('Create this new event?')) return;
+          var calId = state.updateCalendarId;
+          var pev = change.preview;
+          var copy = Object.assign({}, pev);
+          try { copy.startDateTime = new Date(copy.startDate + 'T' + copy.startTime + ':00').toISOString(); } catch(e) {}
+          try { copy.endDateTime = new Date(copy.startDate + 'T' + copy.endTime + ':00').toISOString(); } catch(e) {}
+          showSpinner(true);
+          rpc('ensureUserWorkerTrigger')
+            .then(function() { return rpc('enqueueJob', [copy], calId); })
+            .then(function(jobId) {
+              row.style.opacity = '0.3'; createBtn.disabled = true; cb3.disabled = true;
+              alert('Event queued for creation (Job: ' + jobId + ').');
+              try { startJobsPoller(); } catch(e) {}
+              try { rpc('processUserJobs').catch(function(){}); } catch(e) {}
+            })
+            .catch(function(err) { alert('Failed: ' + (err && err.message ? err.message : err)); })
+            .finally(function() { showSpinner(false); });
+        });
+        actionsCol.appendChild(cb3);
+        actionsCol.appendChild(document.createElement('br'));
+        actionsCol.appendChild(createBtn);
+      }
+
+      row.appendChild(leftCol);
+      row.appendChild(rightCol);
+      row.appendChild(actionsCol);
+      unmatchedSection.appendChild(row);
+    });
+  }
+
+  function loadUpdateTimetableRows(dataFetcher, shouldReplace, opts) {
+    var options = opts || {};
+    var silentFailure = !!options.silentFailure;
+    showSpinner(true);
+    return dataFetcher()
+      .then(function(rows) {
+        var container = document.getElementById('updateFormRows');
+        if (shouldReplace) {
+          Array.from(container.querySelectorAll('.form-row')).filter(function(r) { return !r.dataset.template && !r.classList.contains('header'); }).forEach(function(r) { r.remove(); });
+        }
+        (rows || []).forEach(function(r) { addUpdateRow(r); });
+        showInlineStatus('updateStatusMessage', 'Loaded ' + ((rows || []).length) + ' timetable row(s).', 'success');
+      })
+      .catch(function(err) {
+        console.error('Loading update timetable failed', err);
+        showInlineStatus('updateStatusMessage', 'Failed to load timetable rows.', 'danger');
+        if (!silentFailure) alert('Failed to load timetable.');
+        throw err;
+      })
+      .finally(function() { showSpinner(false); });
+  }
+
+  function tryAutoLoadUpdateTabTimetable() {
+    if (state.updateDefaultLoaded || state.updateDefaultLoadPending) return;
+    var container = document.getElementById('updateFormRows');
+    if (!container) return;
+    var hasRows = Array.from(container.querySelectorAll('.form-row')).some(function(r) {
+      return !r.dataset.template && !r.classList.contains('header');
+    });
+    if (hasRows) {
+      state.updateDefaultLoaded = true;
+      return;
+    }
+
+    state.updateDefaultLoadPending = true;
+    loadUpdateTimetableRows(function() {
+      return rpc('getInitialData').then(function(data) { return data.userTimetable || []; });
+    }, true, { silentFailure: true })
+      .then(function() { state.updateDefaultLoaded = true; })
+      .catch(function() { /* silent auto-load failure */ })
+      .finally(function() { state.updateDefaultLoadPending = false; });
+  }
+
+  function showUpdateLoadConfirmModal(title, message, dataFetcher) {
+    var modal = document.getElementById('loadConfirmModal');
+    var titleEl = document.getElementById('loadConfirmTitle');
+    var messageEl = document.getElementById('loadConfirmMessage');
+    var replaceBtn = document.getElementById('loadConfirmReplace');
+    var addBtn = document.getElementById('loadConfirmAdd');
+    var cancelBtn = document.getElementById('loadConfirmCancel');
+    titleEl.textContent = title;
+    messageEl.textContent = message;
+    modal.style.display = '';
+    var newReplaceBtn = replaceBtn.cloneNode(true);
+    var newAddBtn = addBtn.cloneNode(true);
+    var newCancelBtn = cancelBtn.cloneNode(true);
+    replaceBtn.parentNode.replaceChild(newReplaceBtn, replaceBtn);
+    addBtn.parentNode.replaceChild(newAddBtn, addBtn);
+    cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
+    function hideModal() { modal.style.display = 'none'; }
+    function loadData(shouldReplace) {
+      hideModal();
+      loadUpdateTimetableRows(dataFetcher, shouldReplace)
+        .catch(function() { /* handled in helper */ });
+    }
+    newReplaceBtn.addEventListener('click', function() { loadData(true); });
+    newAddBtn.addEventListener('click', function() { loadData(false); });
+    newCancelBtn.addEventListener('click', hideModal);
+    modal.addEventListener('click', function(e) { if (e.target === modal) hideModal(); });
+  }
+
+  // Reusable color picker function
+  function createColorPicker(selectedColorId, onColorChange) {
+    // Google Calendar color options
+    const colorOptions = [
+      { id: '1', name: 'Lavender', color: '#7986cb' },
+      { id: '2', name: 'Sage', color: '#33b679' },
+      { id: '3', name: 'Grape', color: '#8e24aa' },
+      { id: '4', name: 'Flamingo', color: '#e67c73' },
+      { id: '5', name: 'Banana', color: '#f6c026' },
+      { id: '6', name: 'Tangerine', color: '#f5511d' },
+      { id: '7', name: 'Peacock', color: '#039be5' },
+      { id: '8', name: 'Graphite', color: '#616161' },
+      { id: '9', name: 'Blueberry', color: '#3f51b5' },
+      { id: '10', name: 'Basil', color: '#0b8043' },
+      { id: '11', name: 'Tomato', color: '#d60000' }
+    ];
+    
+    const colorPickerContainer = document.createElement('div');
+    colorPickerContainer.className = 'color-picker-container';
+    colorPickerContainer.style.display = 'grid';
+    colorPickerContainer.style.gridTemplateColumns = 'repeat(auto-fit, minmax(120px, 1fr))';
+    colorPickerContainer.style.gap = '8px';
+    colorPickerContainer.style.padding = '8px';
+    colorPickerContainer.style.border = '1px solid var(--border)';
+    colorPickerContainer.style.borderRadius = '4px';
+    colorPickerContainer.style.background = '#0f1525';
+    
+    let currentSelectedId = selectedColorId || '1';
+    
+    colorOptions.forEach((option, index) => {
+      const colorOption = document.createElement('div');
+      colorOption.className = 'color-option';
+      colorOption.style.display = 'flex';
+      colorOption.style.alignItems = 'center';
+      colorOption.style.padding = '8px';
+      colorOption.style.cursor = 'pointer';
+      colorOption.style.borderRadius = '4px';
+      colorOption.style.border = '2px solid transparent';
+      colorOption.style.transition = 'border-color 0.2s ease';
+      
+      // Select the specified option or first by default
+      if (option.id === currentSelectedId || (!selectedColorId && index === 0)) {
+        currentSelectedId = option.id;
+        colorOption.style.borderColor = 'var(--primary)';
+        colorOption.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
+      }
+      
+      const colorPatch = document.createElement('div');
+      colorPatch.style.width = '20px';
+      colorPatch.style.height = '20px';
+      colorPatch.style.backgroundColor = option.color;
+      colorPatch.style.borderRadius = '3px';
+      colorPatch.style.marginRight = '8px';
+      colorPatch.style.border = '1px solid rgba(255,255,255,0.2)';
+      
+      const colorName = document.createElement('span');
+      colorName.textContent = option.name;
+      colorName.style.color = 'var(--text)';
+      colorName.style.fontSize = '14px';
+      
+      colorOption.appendChild(colorPatch);
+      colorOption.appendChild(colorName);
+      
+      colorOption.addEventListener('click', () => {
+        // Remove previous selection
+        colorPickerContainer.querySelectorAll('.color-option').forEach(opt => {
+          opt.style.borderColor = 'transparent';
+          opt.style.backgroundColor = 'transparent';
+        });
+        
+        // Mark this option as selected
+        colorOption.style.borderColor = 'var(--primary)';
+        colorOption.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
+        currentSelectedId = option.id;
+        
+        if (onColorChange) onColorChange(option.id, option);
+      });
+      
+      colorPickerContainer.appendChild(colorOption);
+    });
+    
+    return { 
+      element: colorPickerContainer, 
+      getSelectedColor: () => currentSelectedId,
+      colorOptions
+    };
+  }
+
+  // Helper function to format date/time for editing
+  function formatDateTimeForEdit(isoString) {
+    if (!isoString) return { date: '', time: '' };
+    const dt = new Date(isoString);
+    const date = dt.toISOString().slice(0, 10);
+    const time = ('0' + dt.getHours()).slice(-2) + ':' + ('0' + dt.getMinutes()).slice(-2);
+    return { date, time };
+  }
+
+  // Helper function to get color name from ID
+  function getColorNameFromId(colorId) {
+    const colorMap = {
+      '1': 'Lavender', '2': 'Sage', '3': 'Grape', '4': 'Flamingo', '5': 'Banana',
+      '6': 'Tangerine', '7': 'Peacock', '8': 'Graphite', '9': 'Blueberry', '10': 'Basil', '11': 'Tomato'
+    };
+    return colorMap[colorId] || 'Default';
+  }
+
   function fmt(dt) {
     try {
       const d = new Date(dt);
@@ -566,6 +1123,175 @@
       const details = document.createElement('details');
       const summary = document.createElement('summary');
       summary.textContent = title + ' (' + events.length + ' events)';
+      
+      // Container for batch action buttons
+      const batchButtonsContainer = document.createElement('div');
+      batchButtonsContainer.className = 'batch-buttons';
+      batchButtonsContainer.style.marginLeft = '8px';
+      batchButtonsContainer.style.display = 'inline-block';
+      
+      // Add a batch edit color button at the group level
+      const colorAllBtn = document.createElement('button');
+      colorAllBtn.className = 'btn primary mini';
+      colorAllBtn.style.marginRight = '4px';
+      colorAllBtn.textContent = 'Set colors';
+      colorAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        
+        // Build modal for batch color editing
+        const overlay = document.createElement('div');
+        overlay.id = 'preview-edit-color-modal';
+        overlay.className = 'schoogle-modal-overlay';
+        const box = document.createElement('div');
+        box.className = 'schoogle-modal-box';
+        const h = document.createElement('h3'); h.textContent = 'Set colors for "' + title + '"'; box.appendChild(h);
+        
+        const colorInputContainer = document.createElement('div');
+        colorInputContainer.style.marginBottom = '16px';
+        const colorLabel = document.createElement('label');
+        colorLabel.textContent = 'Select color:';
+        colorLabel.style.display = 'block';
+        colorLabel.style.marginBottom = '4px';
+        
+        const colorPicker = createColorPicker(null, null);
+        
+        colorInputContainer.appendChild(colorLabel);
+        colorInputContainer.appendChild(colorPicker.element);
+        box.appendChild(colorInputContainer);
+        
+        const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+        const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+        events.forEach(ev => {
+          const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+          const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.index = events.indexOf(ev);
+          const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + (ev.startDate || 'Date TBD') + ' ' + (ev.startTime || 'Time TBD');
+          li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+        });
+        box.appendChild(ul);
+        const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+        const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+        btnCancel.addEventListener('click', () => overlay.remove());
+        const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+        btnConfirm.addEventListener('click', () => {
+          const selectedColor = colorPicker.getSelectedColor();
+          if (!selectedColor) { alert('Please select a color.'); return; }
+          const selectedIndices = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>parseInt(i.dataset.index));
+          if (!selectedIndices.length) { alert('No events selected.'); return; }
+          
+          // Update the selected events
+          selectedIndices.forEach(index => {
+            events[index].colorId = selectedColor;
+          });
+          
+          overlay.remove();
+          renderPreview(); // Re-render to show color changes
+          alert('Updated ' + selectedIndices.length + ' events.');
+        });
+        btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+        overlay.appendChild(box); document.body.appendChild(overlay);
+      });
+      batchButtonsContainer.appendChild(colorAllBtn);
+      
+      // Add a batch invite button at the group level
+      const inviteAllBtn = document.createElement('button');
+      inviteAllBtn.className = 'btn secondary mini';
+      inviteAllBtn.style.marginRight = '4px';
+      inviteAllBtn.textContent = 'Set invites';
+      inviteAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        
+        // Build modal for batch invitation editing
+        const overlay = document.createElement('div');
+        overlay.id = 'preview-edit-invites-modal';
+        overlay.className = 'schoogle-modal-overlay';
+        const box = document.createElement('div');
+        box.className = 'schoogle-modal-box';
+        const h = document.createElement('h3'); h.textContent = 'Set invitations for "' + title + '"'; box.appendChild(h);
+        
+        const inviteInputContainer = document.createElement('div');
+        inviteInputContainer.style.marginBottom = '16px';
+        const inviteLabel = document.createElement('label');
+        inviteLabel.textContent = 'Email addresses (comma-separated):';
+        inviteLabel.style.display = 'block';
+        inviteLabel.style.marginBottom = '4px';
+        
+        const inviteInput = document.createElement('textarea');
+        inviteInput.style.width = '100%';
+        inviteInput.style.height = '80px';
+        inviteInput.style.padding = '8px';
+        inviteInput.style.border = '1px solid var(--border)';
+        inviteInput.style.borderRadius = '4px';
+        inviteInput.style.background = '#0f1525';
+        inviteInput.style.color = 'var(--text)';
+        inviteInput.style.fontFamily = 'inherit';
+        inviteInput.style.fontSize = '14px';
+        inviteInput.style.resize = 'vertical';
+        inviteInput.placeholder = 'user1@example.com, user2@example.com, user3@example.com';
+        
+        // Check if any events already have invites set and pre-populate
+        const existingInvites = events.find(ev => ev.inviteEmails);
+        if (existingInvites && existingInvites.inviteEmails) {
+          inviteInput.value = Array.isArray(existingInvites.inviteEmails) ? existingInvites.inviteEmails.join(', ') : existingInvites.inviteEmails;
+        }
+        
+        const helpText = document.createElement('div');
+        helpText.style.fontSize = '12px';
+        helpText.style.color = 'var(--muted)';
+        helpText.style.marginTop = '4px';
+        helpText.textContent = 'Enter email addresses separated by commas. These users will be invited to the selected events.';
+        
+        inviteInputContainer.appendChild(inviteLabel);
+        inviteInputContainer.appendChild(inviteInput);
+        inviteInputContainer.appendChild(helpText);
+        box.appendChild(inviteInputContainer);
+        
+        const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+        const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+        events.forEach(ev => {
+          const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+          const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.index = events.indexOf(ev);
+          const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + (ev.startDate || 'Date TBD') + ' ' + (ev.startTime || 'Time TBD');
+          li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+        });
+        box.appendChild(ul);
+        const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+        const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+        btnCancel.addEventListener('click', () => overlay.remove());
+        const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+        btnConfirm.addEventListener('click', () => {
+          const emailString = inviteInput.value.trim();
+          const selectedIndices = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>parseInt(i.dataset.index));
+          if (!selectedIndices.length) { alert('No events selected.'); return; }
+          
+          // Parse and validate email addresses
+          let emails = [];
+          if (emailString) {
+            emails = emailString.split(',').map(email => email.trim()).filter(email => {
+              const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+              return emailRegex.test(email);
+            });
+            
+            if (emailString && emails.length === 0) {
+              alert('Please enter valid email addresses.');
+              return;
+            }
+          }
+          
+          // Update the selected events
+          selectedIndices.forEach(index => {
+            events[index].inviteEmails = emails.length > 0 ? emails : null;
+          });
+          
+          overlay.remove();
+          renderPreview(); // Re-render to show invite changes
+          alert('Updated invitations for ' + selectedIndices.length + ' events.' + (emails.length > 0 ? ' (' + emails.length + ' invitees)' : ' (cleared invitations)'));
+        });
+        btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+        overlay.appendChild(box); document.body.appendChild(overlay);
+      });
+      batchButtonsContainer.appendChild(inviteAllBtn);
+      
+      summary.appendChild(batchButtonsContainer);
       details.appendChild(summary);
 
       const ul = document.createElement('ul');
@@ -633,6 +1359,92 @@
         titleInput.className = 'event-title-edit';
         titleInput.addEventListener('input', () => { ev.title = titleInput.value; });
 
+        // Color picker for individual events
+        const colorContainer = document.createElement('div');
+        colorContainer.style.display = 'flex';
+        colorContainer.style.alignItems = 'center';
+        colorContainer.style.marginTop = '8px';
+        colorContainer.style.gap = '8px';
+        
+        const colorLabel = document.createElement('span');
+        colorLabel.textContent = 'Color:';
+        colorLabel.style.fontSize = '12px';
+        colorLabel.style.color = 'var(--muted)';
+        colorLabel.style.minWidth = '35px';
+        
+        const colorBtn = document.createElement('button');
+        colorBtn.type = 'button';
+        colorBtn.className = 'btn mini';
+        colorBtn.style.padding = '4px 8px';
+        colorBtn.style.fontSize = '11px';
+        const currentColorName = getColorNameFromId(ev.colorId || '1');
+        colorBtn.textContent = currentColorName;
+        colorBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          
+          // Create mini color picker modal
+          const overlay = document.createElement('div');
+          overlay.className = 'schoogle-modal-overlay';
+          const box = document.createElement('div');
+          box.className = 'schoogle-modal-box';
+          box.style.maxWidth = '400px';
+          const h = document.createElement('h4'); h.textContent = 'Select color for: ' + ev.title; h.style.margin = '0 0 12px 0'; box.appendChild(h);
+          
+          const colorPicker = createColorPicker(ev.colorId || '1', (colorId, colorOption) => {
+            ev.colorId = colorId;
+            colorBtn.textContent = colorOption.name;
+            overlay.remove();
+          });
+          
+          box.appendChild(colorPicker.element);
+          
+          const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '12px';
+          const btnCancel = document.createElement('button'); btnCancel.className = 'btn mini'; btnCancel.textContent = 'Cancel';
+          btnCancel.addEventListener('click', () => overlay.remove());
+          btnBar.appendChild(btnCancel);
+          box.appendChild(btnBar);
+          
+          overlay.appendChild(box); document.body.appendChild(overlay);
+        });
+        
+        colorContainer.appendChild(colorLabel);
+        colorContainer.appendChild(colorBtn);
+
+        // Email invitations for individual events
+        const inviteContainer = document.createElement('div');
+        inviteContainer.style.marginTop = '8px';
+        
+        const inviteLabel = document.createElement('span');
+        inviteLabel.textContent = 'Invites:';
+        inviteLabel.style.fontSize = '12px';
+        inviteLabel.style.color = 'var(--muted)';
+        inviteLabel.style.display = 'block';
+        inviteLabel.style.marginBottom = '4px';
+        
+        const inviteInput = document.createElement('input');
+        inviteInput.type = 'text';
+        inviteInput.style.width = '100%';
+        inviteInput.style.padding = '4px 8px';
+        inviteInput.style.border = '1px solid var(--border)';
+        inviteInput.style.borderRadius = '4px';
+        inviteInput.style.background = '#0f1525';
+        inviteInput.style.color = 'var(--text)';
+        inviteInput.style.fontSize = '12px';
+        inviteInput.placeholder = 'user1@example.com, user2@example.com';
+        inviteInput.value = ev.inviteEmails ? (Array.isArray(ev.inviteEmails) ? ev.inviteEmails.join(', ') : ev.inviteEmails) : '';
+        inviteInput.addEventListener('input', () => {
+          const emailString = inviteInput.value.trim();
+          if (emailString) {
+            const emails = emailString.split(',').map(email => email.trim()).filter(email => email);
+            ev.inviteEmails = emails.length > 0 ? emails : null;
+          } else {
+            ev.inviteEmails = null;
+          }
+        });
+        
+        inviteContainer.appendChild(inviteLabel);
+        inviteContainer.appendChild(inviteInput);
+
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.textContent = 'Delete';
@@ -658,6 +1470,8 @@
 
   li.appendChild(timeWrapper);
         li.appendChild(titleInput);
+        li.appendChild(colorContainer);
+        li.appendChild(inviteContainer);
         li.appendChild(delBtn);
         ul.appendChild(li);
       });
@@ -670,7 +1484,17 @@
   function updatePreviewMeta() {
     const meta = document.getElementById('previewMeta');
     const n = state.previewEvents.length;
-    meta.textContent = 'Total events to create: ' + n + '. Estimated time ~ ' + n + 's.';
+    const fromDate = document.getElementById('fromDate').value;
+    const toDate = document.getElementById('toDate').value;
+    
+    let dateWindowText = '';
+    if (fromDate && toDate) {
+      dateWindowText = ` Date window: ${fromDate} to ${toDate}.`;
+    } else if (fromDate || toDate) {
+      dateWindowText = ` Date window: ${fromDate || 'start'} to ${toDate || 'end'}.`;
+    }
+    
+    meta.textContent = `Total events to create: ${n}. Estimated time ~ ${n}s.${dateWindowText}`;
   }
 
   function populateCalendars(selectEl, calendars) {
@@ -694,6 +1518,13 @@
         state.calendars = cals || [];
         populateCalendars(document.getElementById('calendarSelect'), state.calendars);
         populateCalendars(document.getElementById('viewCalendarSelect'), state.calendars);
+        // Populate Update tab calendar select (without "Create new" option)
+        var _updateCalSel = document.getElementById('updateCalendarSelect');
+        if (_updateCalSel) {
+          populateCalendars(_updateCalSel, state.calendars);
+          var _newOpt = _updateCalSel.querySelector('option[value="__new__"]');
+          if (_newOpt) _newOpt.remove();
+        }
         console.debug('Calendars loaded', { count: state.calendars.length, sample: state.calendars.slice(0,5) });
       })
       .catch(err => {
@@ -767,9 +1598,11 @@
     // Preview
   document.getElementById('previewBtn').addEventListener('click', () => {
       const data = collectFormData();
-      if (!data.length) { alert('Please enter at least one row.'); return; }
+      if (!data.length) { showInlineStatus('addStatusMessage', 'Please enter or load at least one timetable row before previewing.', 'warning'); return; }
   const from = document.getElementById('fromDate').value;
   const to = document.getElementById('toDate').value;
+      console.log('Preview click - date values:', { from, to, fromType: typeof from, toType: typeof to });
+      
       // Snapshot all rows (including partial) for debugging
       const rowsSnapshot = Array.from(document.querySelectorAll('#formRows .form-row'))
         .filter(r => !r.dataset.template && !r.classList.contains('header'))
@@ -787,6 +1620,11 @@
           try { document.getElementById('createBtn').disabled = false; } catch (e) {}
           // Debug: log raw full payload (RPC_DEBUG will show full bodies; otherwise this still helps)
           console.log('Generated Events (raw):', evts);
+          
+          // Log debug info if present
+          if (evts && evts.debug) {
+            console.log('Server Debug Info:', evts.debug);
+          }
 
           // Defensive normalization: server may return an array or an object like { results: [...] }.
           let normalized = [];
@@ -841,9 +1679,27 @@
 
           console.log('Generated Events (normalized):', { count: normalized.length, sample: normalized.slice(0,5), type: Object.prototype.toString.call(evts) });
           state.previewEvents = normalized || [];
+          
+          // === DEBUG: Full state.previewEvents after Preview ===
+          console.log('🔍 PREVIEW COMPLETED - state.previewEvents populated:');
+          console.log('  Count:', state.previewEvents.length);
+          console.log('  Full contents:', state.previewEvents);
+          console.log('  Sample with key fields:', state.previewEvents.slice(0, 3).map(ev => ({
+            title: ev.title,
+            startDate: ev.startDate,
+            startTime: ev.startTime,
+            endDate: ev.endDate,
+            endTime: ev.endTime,
+            hasStartDateTime: !!ev.startDateTime,
+            hasEndDateTime: !!ev.endDateTime
+          })));
+          // === END DEBUG ===
+          
           console.debug('generatePreviewEvents -> success', { count: state.previewEvents.length, sample: state.previewEvents.slice(0,5) });
           document.getElementById('formSection').style.display = 'none';
           document.getElementById('previewSection').style.display = '';
+          setStepperProgress('addStepper', 2);
+          showInlineStatus('addStatusMessage', '', '');
           updatePreviewMeta();
           renderPreview();
           if (!state.previewEvents.length) {
@@ -858,79 +1714,81 @@
         .finally(() => showSpinner(false));
     });
 
-    // Load other teacher timetable UI
+    // Add tab source loaders (always visible)
     try {
-      const showBtn = document.getElementById('showLoadOtherBtn');
-      const wrap = document.getElementById('otherLoadWrap');
-      const select = document.getElementById('otherTeacherSelect');
-      const loadBtn = document.getElementById('loadOtherBtn');
-      if (showBtn && wrap && select && loadBtn) {
-        showBtn.addEventListener('click', () => {
-          // Hide the button and show the dropdown
-          showBtn.style.display = 'none';
-          wrap.style.display = '';
-          if (!select.options.length) {
-            showSpinner(true);
-            rpc('getTeachers').then(list => {
-              // populate select alphabetically (server already sorts)
-              select.innerHTML = '';
-              const opt = document.createElement('option'); opt.value = ''; opt.textContent = '-- Select teacher --'; select.appendChild(opt);
-              (list || []).forEach(t => { const o = document.createElement('option'); o.value = t.email; o.textContent = t.name || t.email; select.appendChild(o); });
-            }).catch(err => { console.error('getTeachers failed', err); alert('Failed to load teachers.'); }).finally(()=>showSpinner(false));
-          }
-        });
-
-        loadBtn.addEventListener('click', () => {
-          const email = (select.value || '').toString().trim();
-          if (!email) { alert('Select a teacher to load.'); return; }
-          const teacherName = select.options[select.selectedIndex].text || email;
-          showLoadConfirmModal('Load Teacher Timetable', 'Load timetable for ' + teacherName + '?', () => {
-            return rpc('getTeacherTimetable', email);
-          });
-        });
-      }
-    } catch (e) { console.warn('other teacher UI wiring failed', e); }
-
-    // Load other classes UI
-    try {
-      const showClassBtn = document.getElementById('showLoadClassesBtn');
-      const classWrap = document.getElementById('classLoadWrap');
+      const teacherSelect = document.getElementById('otherTeacherSelect');
+      const loadTeacherBtn = document.getElementById('loadOtherBtn');
       const classSelect = document.getElementById('classSelect');
       const loadClassBtn = document.getElementById('loadClassBtn');
-      if (showClassBtn && classWrap && classSelect && loadClassBtn) {
-        showClassBtn.addEventListener('click', () => {
-          // Hide the button and show the dropdown
-          showClassBtn.style.display = 'none';
-          classWrap.style.display = '';
-          if (!classSelect.options.length) {
-            showSpinner(true);
-            rpc('getClasses').then(list => {
-              // populate select alphabetically (server already sorts)
-              classSelect.innerHTML = '';
-              const opt = document.createElement('option'); opt.value = ''; opt.textContent = '-- Select class --'; classSelect.appendChild(opt);
-              (list || []).forEach(className => { const o = document.createElement('option'); o.value = className; o.textContent = className; classSelect.appendChild(o); });
-            }).catch(err => { console.error('getClasses failed', err); alert('Failed to load classes.'); }).finally(()=>showSpinner(false));
-          }
-        });
+      const roomSelect = document.getElementById('roomSelect');
+      const loadRoomBtn = document.getElementById('loadRoomBtn');
 
+      if (loadTeacherBtn && teacherSelect) {
+        loadTeacherBtn.addEventListener('click', () => {
+          const email = (teacherSelect.value || '').toString().trim();
+          if (!email) { showInlineStatus('addStatusMessage', 'Select a teacher timetable first.', 'warning'); return; }
+          const teacherName = teacherSelect.options[teacherSelect.selectedIndex].text || email;
+          showLoadConfirmModal('Load Teacher Timetable', 'Load timetable for ' + teacherName + '?', () => rpc('getTeacherTimetable', email));
+        });
+      }
+
+      if (loadClassBtn && classSelect) {
         loadClassBtn.addEventListener('click', () => {
           const className = (classSelect.value || '').toString().trim();
-          if (!className) { alert('Select a class to load.'); return; }
-          showLoadConfirmModal('Load Class Timetable', 'Load timetable for ' + className + '?', () => {
-            return rpc('getClassTimetable', className);
+          if (!className) { showInlineStatus('addStatusMessage', 'Select a class timetable first.', 'warning'); return; }
+          showLoadConfirmModal('Load Class Timetable', 'Load timetable for ' + className + '?', () => rpc('getClassTimetable', className));
+        });
+      }
+
+      if (loadRoomBtn && roomSelect) {
+        loadRoomBtn.addEventListener('click', () => {
+          const roomName = (roomSelect.value || '').toString().trim();
+          if (!roomName) { showInlineStatus('addStatusMessage', 'Select a room timetable first.', 'warning'); return; }
+          showLoadConfirmModal('Load Room Timetable', 'Load timetable for ' + roomName + '?', () => rpc('getRoomTimetable', roomName));
+        });
+      }
+    } catch (e) { console.warn('Add source loader wiring failed', e); }
+
+    // Load My Timetable button
+    try {
+      const loadMyTimetableBtn = document.getElementById('loadMyTimetableBtn');
+      if (loadMyTimetableBtn) {
+        loadMyTimetableBtn.addEventListener('click', () => {
+          showInlineStatus('addStatusMessage', '', '');
+          showLoadConfirmModal('Load My Timetable', 'Load your own timetable?', () => {
+            return rpc('getInitialData').then(data => {
+              return data.userTimetable || [];
+            });
           });
         });
       }
-    } catch (e) { console.warn('class UI wiring failed', e); }
+    } catch (e) { console.warn('Load My Timetable UI wiring failed', e); }
 
     // Create
     document.getElementById('createBtn').addEventListener('click', () => {
-      if (!state.previewEvents.length) { alert('No events to create.'); return; }
+      // === DEBUG: Full state.previewEvents when Create is clicked ===
+      console.log('🔍 CREATE CLICKED - Current state.previewEvents:');
+      console.log('  Count:', state.previewEvents.length);
+      console.log('  Full contents:', state.previewEvents);
+      console.log('  Sample with key fields:', state.previewEvents.slice(0, 3).map(ev => ({
+        title: ev.title,
+        startDate: ev.startDate,
+        startTime: ev.startTime,
+        endDate: ev.endDate,
+        endTime: ev.endTime,
+        hasStartDateTime: !!ev.startDateTime,
+        hasEndDateTime: !!ev.endDateTime
+      })));
+      // === END DEBUG ===
+      
+      if (!state.previewEvents.length) { showInlineStatus('addStatusMessage', 'No preview events available. Click Preview Events first.', 'warning'); return; }
       const calSel = document.getElementById('calendarSelect');
       let calendarId = calSel.value;
       const newNameEl = document.getElementById('newCalendarName');
 
       const createRunner = () => {
+        setStepperProgress('addStepper', 3);
+        showInlineStatus('addStatusMessage', 'Step 3: Creating events and starting job processing.', 'info');
         const progress = document.getElementById('createProgress');
         progress.style.display = '';
         progress.textContent = 'Enqueuing job for ' + state.previewEvents.length + ' events…';
@@ -963,6 +1821,20 @@
           .then(jobId => {
             console.debug('Job enqueued', { jobId });
             progress.textContent = 'Job queued: ' + jobId + '. Check Jobs tab for progress…';
+            showInlineStatus('addStatusMessage', 'Success: job ' + jobId + ' has been queued. Check Active Jobs for progress.', 'success');
+            
+            // ✅ CLEAR preview events after successful enqueue
+            console.log('🔍 CLEARING state.previewEvents after successful job enqueue');
+            state.previewEvents = [];
+            const previewContainer = document.getElementById('previewContainer');
+            if (previewContainer) previewContainer.innerHTML = '';
+            updatePreviewMeta();
+            
+            // Switch back to form view since preview is now cleared
+            document.getElementById('formSection').style.display = '';
+            document.getElementById('previewSection').style.display = 'none';
+            setStepperProgress('addStepper', 1);
+            
             // Ensure jobs list poller starts so Jobs tab shows the queued job
             try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
             // Fire-and-forget kickoff so processing starts ASAP, even if the timed trigger hasn't fired yet
@@ -973,6 +1845,7 @@
           })
           .catch(err => {
             console.error('enqueueJob/ensureWorker failed', err);
+            showInlineStatus('addStatusMessage', 'Failed to install worker or queue events. Please retry.', 'danger');
             alert('Failed to install worker or enqueue job: ' + (err && err.message ? err.message : err));
             try { document.getElementById('createBtn').disabled = false; } catch (e) {}
           })
@@ -982,10 +1855,12 @@
       if (calendarId === '__new__') {
         const name = newNameEl.value.trim();
         if (!name) { alert('Enter a new calendar name.'); return; }
+        showInlineStatus('addStatusMessage', 'Creating new calendar "' + name + '" before queueing events...', 'info');
         showSpinner(true);
         rpc('createNewCalendar', name)
           .then(id => {
             calendarId = id;
+            showInlineStatus('addStatusMessage', 'Calendar created. Queueing events next.', 'success');
             loadCalendars();
             createRunner();
           });
@@ -1094,8 +1969,7 @@
           const previewContainer = document.getElementById('previewContainer');
           if (previewContainer) previewContainer.innerHTML = '';
           try { document.getElementById('createBtn').disabled = false; } catch (e) {}
-          try { document.getElementById('fromDate').value = ''; } catch (e) {}
-          try { document.getElementById('toDate').value = ''; } catch (e) {}
+          // Don't clear date fields - they should persist for next use
         } catch (e) { /* ignore UI errors */ }
       }
     }
@@ -1104,6 +1978,7 @@
     document.getElementById('backToFormBtn').addEventListener('click', () => {
       document.getElementById('previewSection').style.display = 'none';
       document.getElementById('formSection').style.display = '';
+      setStepperProgress('addStepper', 1);
       // Keep current rows; user can edit and re-preview
   console.debug('Back to form clicked');
     });
@@ -1126,25 +2001,37 @@
     rpc('getInitialData')
       .then(data => {
         state.periods = data.periods || [];
-        // If timetable exists, sort by title then day and use it to populate rows, overwriting the initial blank.
-        if (data.userTimetable && data.userTimetable.length) {
-          const ut = (data.userTimetable || []).slice().sort((a, b) => {
-            const ta = (a.title || '').toString();
-            const tb = (b.title || '').toString();
-            const cmp = ta.localeCompare(tb);
-            if (cmp !== 0) return cmp;
-            const da = (a.day || '').toString();
-            const db = (b.day || '').toString();
-            return da.localeCompare(db);
-          });
-          // Populate rows in sorted order
-          for (let i = 0; i < ut.length; i++) addRow(ut[i]);
-        } else {
-          addRow();
-        }
+        state.userEmail = data.userEmail || '';
+        updateWelcomeHeading();
+        addRow();
+        setStepperProgress('addStepper', 1);
+        setStepperProgress('updateStepper', 1);
+        showInlineStatus('addStatusMessage', 'Step 1: Load a timetable source, then review the rows below.', 'info');
         console.debug('Initial data loaded', { periodsCount: state.periods.length, userTimetableCount: (data.userTimetable||[]).length, defaultFrom: data.defaultFrom, defaultTo: data.defaultTo });
-        if (data.defaultFrom) document.getElementById('fromDate').value = data.defaultFrom;
-        if (data.defaultTo) document.getElementById('toDate').value = data.defaultTo;
+        
+        // Set date values with better debugging
+        const fromDateEl = document.getElementById('fromDate');
+        const toDateEl = document.getElementById('toDate');
+        console.log('Date elements found:', { fromDateEl: !!fromDateEl, toDateEl: !!toDateEl });
+        
+        if (data.defaultFrom && fromDateEl) {
+          console.log('Setting fromDate to:', data.defaultFrom);
+          fromDateEl.value = data.defaultFrom;
+          console.log('fromDate value after setting:', fromDateEl.value);
+        }
+        if (data.defaultTo && toDateEl) {
+          console.log('Setting toDate to:', data.defaultTo);
+          toDateEl.value = data.defaultTo;
+          console.log('toDate value after setting:', toDateEl.value);
+        }
+        
+        // Set Update tab dates
+        var _updateFromEl = document.getElementById('updateFromDate');
+        var _updateToEl = document.getElementById('updateToDate');
+        if (data.defaultFrom && _updateFromEl) _updateFromEl.value = data.defaultFrom;
+        if (data.defaultTo && _updateToEl) _updateToEl.value = data.defaultTo;
+        
+        hydrateSourceSelectors();
         loadCalendars();
         // Start job polling
         try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
@@ -1164,19 +2051,369 @@
       const details = document.createElement('details');
       const summary = document.createElement('summary');
       summary.textContent = title + ' (' + groups[title].length + ')';
-      // Add a delete-all button at the group level
-      const deleteAllBtn = document.createElement('button');
-      deleteAllBtn.className = 'btn danger mini';
-      deleteAllBtn.style.marginLeft = '8px';
-      deleteAllBtn.textContent = 'Delete all';
-      deleteAllBtn.addEventListener('click', (e) => {
+      
+      // Container for batch action buttons
+      const batchButtonsContainer = document.createElement('div');
+      batchButtonsContainer.className = 'batch-buttons';
+      batchButtonsContainer.style.marginLeft = '8px';
+      batchButtonsContainer.style.display = 'inline-block';
+      
+      // Add a batch edit title button at the group level
+      const editAllBtn = document.createElement('button');
+      editAllBtn.className = 'btn primary mini';
+      editAllBtn.style.marginRight = '4px';
+      editAllBtn.textContent = 'Edit titles';
+      editAllBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         const calId = document.getElementById('viewCalendarSelect').value;
+        const calSelect = document.getElementById('viewCalendarSelect');
+        editAllBtn.disabled = true;
+        editAllBtn.textContent = 'Loading...';
+        calSelect.disabled = true;
         showSpinner(true);
         // Fetch Schoogle events for the calendar and filter client-side by title
         rpc('getEventsFromCalendar', calId)
           .then(list => {
             showSpinner(false);
+            editAllBtn.disabled = false;
+            editAllBtn.textContent = 'Edit titles';
+            calSelect.disabled = false;
+            if (!list || !list.length) { alert('No Schoogle events found in this calendar.'); return; }
+            const matches = (list || []).filter(ev => {
+              try { return (ev.title || '').toString().trim().toLowerCase() === (title || '').toString().trim().toLowerCase(); } catch (e) { return false; }
+            });
+            if (!matches.length) { alert('No matching events found for "' + title + '".'); return; }
+            
+            // Build modal for batch title editing
+            const overlay = document.createElement('div');
+            overlay.id = 'schoogle-edit-title-modal';
+            overlay.className = 'schoogle-modal-overlay';
+            const box = document.createElement('div');
+            box.className = 'schoogle-modal-box';
+            const h = document.createElement('h3'); h.textContent = 'Batch edit titles for "' + title + '"'; box.appendChild(h);
+            
+            const titleInputContainer = document.createElement('div');
+            titleInputContainer.style.marginBottom = '16px';
+            const titleLabel = document.createElement('label');
+            titleLabel.textContent = 'New title:';
+            titleLabel.style.display = 'block';
+            titleLabel.style.marginBottom = '4px';
+            const titleInput = document.createElement('input');
+            titleInput.type = 'text';
+            titleInput.value = title;
+            titleInput.style.width = '100%';
+            titleInput.style.padding = '8px';
+            titleInput.style.border = '1px solid var(--border)';
+            titleInput.style.borderRadius = '4px';
+            titleInput.style.background = '#0f1525';
+            titleInput.style.color = 'var(--text)';
+            titleInputContainer.appendChild(titleLabel);
+            titleInputContainer.appendChild(titleInput);
+            box.appendChild(titleInputContainer);
+            
+            const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+            const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+            matches.forEach(ev => {
+              const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+              const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.eid = ev.id;
+              const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + fmt(ev.start) + ' → ' + fmt(ev.end) + (ev.location ? ' (' + ev.location + ')' : '');
+              li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+            });
+            box.appendChild(ul);
+            const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+            const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+            btnCancel.addEventListener('click', () => overlay.remove());
+            const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+            btnConfirm.addEventListener('click', () => {
+              const newTitle = titleInput.value.trim();
+              if (!newTitle) { alert('Please enter a new title.'); return; }
+              const selected = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.eid);
+              if (!selected.length) { alert('No events selected.'); return; }
+              btnConfirm.disabled = true;
+              btnConfirm.textContent = 'Updating...';
+              showSpinner(true);
+              rpc('updateEventTitlesByIds', calId, selected, newTitle)
+                .then(res => {
+                  overlay.remove();
+                  alert('Updated ' + (res.updated || 0) + ' events.');
+                  loadViewEvents(calId);
+                })
+                .catch(err => { 
+                  console.error('updateEventTitlesByIds failed', err); 
+                  alert('Update failed: ' + (err && err.message ? err.message : err));
+                  btnConfirm.disabled = false;
+                  btnConfirm.textContent = 'Update selected';
+                })
+                .finally(() => showSpinner(false));
+            });
+            btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+            overlay.appendChild(box); document.body.appendChild(overlay);
+          })
+          .catch(err => { 
+            showSpinner(false); 
+            editAllBtn.disabled = false;
+            editAllBtn.textContent = 'Edit titles';
+            document.getElementById('viewCalendarSelect').disabled = false;
+            console.error('getEventsFromCalendar failed', err); 
+            alert('Failed to list events: ' + (err && err.message ? err.message : err)); 
+          });
+      });
+      batchButtonsContainer.appendChild(editAllBtn);
+      
+      // Add a batch edit color button at the group level
+      const colorAllBtn = document.createElement('button');
+      colorAllBtn.className = 'btn primary mini';
+      colorAllBtn.style.marginRight = '4px';
+      colorAllBtn.textContent = 'Edit colors';
+      colorAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const calId = document.getElementById('viewCalendarSelect').value;
+        const calSelect = document.getElementById('viewCalendarSelect');
+        colorAllBtn.disabled = true;
+        colorAllBtn.textContent = 'Loading...';
+        calSelect.disabled = true;
+        showSpinner(true);
+        // Fetch Schoogle events for the calendar and filter client-side by title
+        rpc('getEventsFromCalendar', calId)
+          .then(list => {
+            showSpinner(false);
+            colorAllBtn.disabled = false;
+            colorAllBtn.textContent = 'Edit colors';
+            calSelect.disabled = false;
+            if (!list || !list.length) { alert('No Schoogle events found in this calendar.'); return; }
+            const matches = (list || []).filter(ev => {
+              try { return (ev.title || '').toString().trim().toLowerCase() === (title || '').toString().trim().toLowerCase(); } catch (e) { return false; }
+            });
+            if (!matches.length) { alert('No matching events found for "' + title + '".'); return; }
+            
+            // Build modal for batch color editing
+            const overlay = document.createElement('div');
+            overlay.id = 'schoogle-edit-color-modal';
+            overlay.className = 'schoogle-modal-overlay';
+            const box = document.createElement('div');
+            box.className = 'schoogle-modal-box';
+            const h = document.createElement('h3'); h.textContent = 'Batch edit colors for "' + title + '"'; box.appendChild(h);
+            
+            const colorInputContainer = document.createElement('div');
+            colorInputContainer.style.marginBottom = '16px';
+            const colorLabel = document.createElement('label');
+            colorLabel.textContent = 'Select color:';
+            colorLabel.style.display = 'block';
+            colorLabel.style.marginBottom = '4px';
+            
+            const colorPicker = createColorPicker(null, null);
+            
+            colorInputContainer.appendChild(colorLabel);
+            colorInputContainer.appendChild(colorPicker.element);
+            box.appendChild(colorInputContainer);
+            
+            const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+            const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+            matches.forEach(ev => {
+              const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+              const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.eid = ev.id;
+              const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + fmt(ev.start) + ' → ' + fmt(ev.end) + (ev.location ? ' (' + ev.location + ')' : '');
+              li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+            });
+            box.appendChild(ul);
+            const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+            const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+            btnCancel.addEventListener('click', () => overlay.remove());
+            const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+            btnConfirm.addEventListener('click', () => {
+              const selectedColor = colorPicker.getSelectedColor();
+              if (!selectedColor) { alert('Please select a color.'); return; }
+              const selected = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.eid);
+              if (!selected.length) { alert('No events selected.'); return; }
+              btnConfirm.disabled = true;
+              btnConfirm.textContent = 'Updating...';
+              showSpinner(true);
+              rpc('updateEventColorsByIds', calId, selected, selectedColor)
+                .then(res => {
+                  overlay.remove();
+                  alert('Updated ' + (res.updated || 0) + ' events.');
+                  loadViewEvents(calId);
+                })
+                .catch(err => { 
+                  console.error('updateEventColorsByIds failed', err); 
+                  alert('Update failed: ' + (err && err.message ? err.message : err));
+                  btnConfirm.disabled = false;
+                  btnConfirm.textContent = 'Update selected';
+                })
+                .finally(() => showSpinner(false));
+            });
+            btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+            overlay.appendChild(box); document.body.appendChild(overlay);
+          })
+          .catch(err => { 
+            showSpinner(false); 
+            colorAllBtn.disabled = false;
+            colorAllBtn.textContent = 'Edit colors';
+            document.getElementById('viewCalendarSelect').disabled = false;
+            console.error('getEventsFromCalendar failed', err); 
+            alert('Failed to list events: ' + (err && err.message ? err.message : err)); 
+          });
+      });
+      batchButtonsContainer.appendChild(colorAllBtn);
+      
+      // Add a batch invite button at the group level for View tab
+      const inviteAllBtn = document.createElement('button');
+      inviteAllBtn.className = 'btn secondary mini';
+      inviteAllBtn.style.marginRight = '4px';
+      inviteAllBtn.textContent = 'Edit invites';
+      inviteAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const calId = document.getElementById('viewCalendarSelect').value;
+        const calSelect = document.getElementById('viewCalendarSelect');
+        inviteAllBtn.disabled = true;
+        inviteAllBtn.textContent = 'Loading...';
+        calSelect.disabled = true;
+        showSpinner(true);
+        // Fetch Schoogle events for the calendar and filter client-side by title
+        rpc('getEventsFromCalendar', calId)
+          .then(list => {
+            showSpinner(false);
+            inviteAllBtn.disabled = false;
+            inviteAllBtn.textContent = 'Edit invites';
+            calSelect.disabled = false;
+            if (!list || !list.length) { alert('No Schoogle events found in this calendar.'); return; }
+            const matches = (list || []).filter(ev => {
+              try { return (ev.title || '').toString().trim().toLowerCase() === (title || '').toString().trim().toLowerCase(); } catch (e) { return false; }
+            });
+            if (!matches.length) { alert('No matching events found for "' + title + '".'); return; }
+            
+            // Build modal for batch invitation editing
+            const overlay = document.createElement('div');
+            overlay.id = 'view-edit-invites-modal';
+            overlay.className = 'schoogle-modal-overlay';
+            const box = document.createElement('div');
+            box.className = 'schoogle-modal-box';
+            const h = document.createElement('h3'); h.textContent = 'Batch edit invitations for "' + title + '"'; box.appendChild(h);
+            
+            const inviteInputContainer = document.createElement('div');
+            inviteInputContainer.style.marginBottom = '16px';
+            const inviteLabel = document.createElement('label');
+            inviteLabel.textContent = 'Email addresses (comma-separated):';
+            inviteLabel.style.display = 'block';
+            inviteLabel.style.marginBottom = '4px';
+            
+            const inviteInput = document.createElement('textarea');
+            inviteInput.style.width = '100%';
+            inviteInput.style.height = '80px';
+            inviteInput.style.padding = '8px';
+            inviteInput.style.border = '1px solid var(--border)';
+            inviteInput.style.borderRadius = '4px';
+            inviteInput.style.background = '#0f1525';
+            inviteInput.style.color = 'var(--text)';
+            inviteInput.style.fontFamily = 'inherit';
+            inviteInput.style.fontSize = '14px';
+            inviteInput.style.resize = 'vertical';
+            inviteInput.placeholder = 'user1@example.com, user2@example.com, user3@example.com';
+            
+            // Check if any events already have invites set and pre-populate
+            const existingInvites = matches.find(ev => ev.inviteEmails || ev.attendees);
+            if (existingInvites) {
+              if (existingInvites.inviteEmails) {
+                inviteInput.value = Array.isArray(existingInvites.inviteEmails) ? existingInvites.inviteEmails.join(', ') : existingInvites.inviteEmails;
+              } else if (existingInvites.attendees && Array.isArray(existingInvites.attendees)) {
+                const emails = existingInvites.attendees.map(a => a.email || a).filter(e => e);
+                inviteInput.value = emails.join(', ');
+              }
+            }
+            
+            const helpText = document.createElement('div');
+            helpText.style.fontSize = '12px';
+            helpText.style.color = 'var(--muted)';
+            helpText.style.marginTop = '4px';
+            helpText.textContent = 'Enter email addresses separated by commas. These users will be invited to the selected events.';
+            
+            inviteInputContainer.appendChild(inviteLabel);
+            inviteInputContainer.appendChild(inviteInput);
+            inviteInputContainer.appendChild(helpText);
+            box.appendChild(inviteInputContainer);
+            
+            const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+            const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+            matches.forEach(ev => {
+              const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+              const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.eid = ev.id;
+              const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + fmt(ev.start) + ' → ' + fmt(ev.end) + (ev.location ? ' (' + ev.location + ')' : '');
+              li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+            });
+            box.appendChild(ul);
+            const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+            const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+            btnCancel.addEventListener('click', () => overlay.remove());
+            const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+            btnConfirm.addEventListener('click', () => {
+              const emailString = inviteInput.value.trim();
+              const selected = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.eid);
+              if (!selected.length) { alert('No events selected.'); return; }
+              
+              // Parse and validate email addresses
+              let emails = [];
+              if (emailString) {
+                emails = emailString.split(',').map(email => email.trim()).filter(email => {
+                  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                  return emailRegex.test(email);
+                });
+                
+                if (emailString && emails.length === 0) {
+                  alert('Please enter valid email addresses.');
+                  return;
+                }
+              }
+              
+              btnConfirm.disabled = true;
+              btnConfirm.textContent = 'Updating...';
+              showSpinner(true);
+              rpc('updateEventInvitesByIds', calId, selected, emails)
+                .then(res => {
+                  overlay.remove();
+                  alert('Updated invitations for ' + (res.updated || 0) + ' events.' + (emails.length > 0 ? ' (' + emails.length + ' invitees)' : ' (cleared invitations)'));
+                  loadViewEvents(calId);
+                })
+                .catch(err => { 
+                  console.error('updateEventInvitesByIds failed', err); 
+                  alert('Update failed: ' + (err && err.message ? err.message : err));
+                  btnConfirm.disabled = false;
+                  btnConfirm.textContent = 'Update selected';
+                })
+                .finally(() => showSpinner(false));
+            });
+            btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+            overlay.appendChild(box); document.body.appendChild(overlay);
+          })
+          .catch(err => { 
+            showSpinner(false); 
+            inviteAllBtn.disabled = false;
+            inviteAllBtn.textContent = 'Edit invites';
+            document.getElementById('viewCalendarSelect').disabled = false;
+            console.error('getEventsFromCalendar failed', err); 
+            alert('Failed to list events: ' + (err && err.message ? err.message : err)); 
+          });
+      });
+      batchButtonsContainer.appendChild(inviteAllBtn);
+      
+      // Add a delete-all button at the group level
+      const deleteAllBtn = document.createElement('button');
+      deleteAllBtn.className = 'btn danger mini';
+      deleteAllBtn.textContent = 'Delete all';
+      deleteAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const calId = document.getElementById('viewCalendarSelect').value;
+        const calSelect = document.getElementById('viewCalendarSelect');
+        deleteAllBtn.disabled = true;
+        deleteAllBtn.textContent = 'Loading...';
+        calSelect.disabled = true;
+        showSpinner(true);
+        // Fetch Schoogle events for the calendar and filter client-side by title
+        rpc('getEventsFromCalendar', calId)
+          .then(list => {
+            showSpinner(false);
+            deleteAllBtn.disabled = false;
+            deleteAllBtn.textContent = 'Delete all';
+            calSelect.disabled = false;
             if (!list || !list.length) { alert('No Schoogle events found in this calendar.'); return; }
             const matches = (list || []).filter(ev => {
               try { return (ev.title || '').toString().trim().toLowerCase() === (title || '').toString().trim().toLowerCase(); } catch (e) { return false; }
@@ -1205,6 +2442,8 @@
             btnConfirm.addEventListener('click', () => {
               const selected = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.eid);
               if (!selected.length) { alert('No events selected.'); return; }
+              btnConfirm.disabled = true;
+              btnConfirm.textContent = 'Deleting...';
               showSpinner(true);
               rpc('deleteEventsByIds', calId, selected)
                 .then(res => {
@@ -1212,15 +2451,29 @@
                   alert('Deleted ' + (res.deleted || 0) + ' events.');
                   loadViewEvents(calId);
                 })
-                .catch(err => { console.error('deleteEventsByIds failed', err); alert('Delete failed: ' + (err && err.message ? err.message : err)); })
+                .catch(err => { 
+                  console.error('deleteEventsByIds failed', err); 
+                  alert('Delete failed: ' + (err && err.message ? err.message : err));
+                  btnConfirm.disabled = false;
+                  btnConfirm.textContent = 'Delete selected';
+                })
                 .finally(() => showSpinner(false));
             });
             btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
             overlay.appendChild(box); document.body.appendChild(overlay);
           })
-          .catch(err => { showSpinner(false); console.error('getEventsFromCalendar failed', err); alert('Failed to list events: ' + (err && err.message ? err.message : err)); });
+          .catch(err => { 
+            showSpinner(false); 
+            deleteAllBtn.disabled = false;
+            deleteAllBtn.textContent = 'Delete all';
+            document.getElementById('viewCalendarSelect').disabled = false;
+            console.error('getEventsFromCalendar failed', err); 
+            alert('Failed to list events: ' + (err && err.message ? err.message : err)); 
+          });
       });
-      summary.appendChild(deleteAllBtn);
+      batchButtonsContainer.appendChild(deleteAllBtn);
+      
+      summary.appendChild(batchButtonsContainer);
       details.appendChild(summary);
 
       const ul = document.createElement('ul');
@@ -1229,36 +2482,382 @@
       groups[title].forEach(ev => {
         const li = document.createElement('li');
         li.className = 'event-item';
+        li.style.padding = '12px';
+        li.style.border = '1px solid var(--border)';
+        li.style.borderRadius = '8px';
+        li.style.marginBottom = '8px';
 
-        const timeSpan = document.createElement('span');
-        timeSpan.className = 'event-time';
-        timeSpan.textContent = fmt(ev.start) + ' → ' + fmt(ev.end);
-
-        const openLink = document.createElement('a');
-        openLink.href = ev.htmlLink; openLink.target = '_blank';
-        openLink.textContent = 'Open';
+        // Create display container for static info
+        const displayContainer = document.createElement('div');
+        displayContainer.className = 'event-display';
+        
+        const titleDisplay = document.createElement('div');
+        titleDisplay.style.fontWeight = '600';
+        titleDisplay.style.marginBottom = '4px';
+        titleDisplay.textContent = ev.title;
+        // Add SchoogleID as tooltip
+        if (ev.schoogleEventId) {
+          titleDisplay.title = 'SchoogleID: ' + ev.schoogleEventId;
+          titleDisplay.style.cursor = 'help';
+        }
+        
+        const timeDisplay = document.createElement('div');
+        timeDisplay.className = 'event-time';
+        timeDisplay.style.marginBottom = '4px';
+        timeDisplay.textContent = fmt(ev.start) + ' → ' + fmt(ev.end);
+        
+        const colorDisplay = document.createElement('div');
+        colorDisplay.style.fontSize = '12px';
+        colorDisplay.style.color = 'var(--muted)';
+        colorDisplay.style.marginBottom = '4px';
+        colorDisplay.textContent = 'Color: ' + getColorNameFromId(ev.colorId || '1');
+        
+        // Add SchoogleID display
+        const schoogleIdDisplay = document.createElement('div');
+        schoogleIdDisplay.style.fontSize = '11px';
+        schoogleIdDisplay.style.color = 'var(--muted)';
+        schoogleIdDisplay.style.marginBottom = '8px';
+        schoogleIdDisplay.style.fontFamily = 'monospace';
+        if (ev.schoogleEventId) {
+          schoogleIdDisplay.textContent = 'SchoogleID: ' + ev.schoogleEventId;
+          schoogleIdDisplay.title = 'Click to copy';
+          schoogleIdDisplay.style.cursor = 'pointer';
+          schoogleIdDisplay.addEventListener('click', () => {
+            navigator.clipboard.writeText(ev.schoogleEventId).then(() => {
+              const originalText = schoogleIdDisplay.textContent;
+              schoogleIdDisplay.textContent = 'SchoogleID: ' + ev.schoogleEventId + ' (copied!)';
+              setTimeout(() => {
+                schoogleIdDisplay.textContent = originalText;
+              }, 1500);
+            }).catch(() => {
+              // Fallback for older browsers
+              const textArea = document.createElement('textarea');
+              textArea.value = ev.schoogleEventId;
+              document.body.appendChild(textArea);
+              textArea.select();
+              document.execCommand('copy');
+              document.body.removeChild(textArea);
+              const originalText = schoogleIdDisplay.textContent;
+              schoogleIdDisplay.textContent = 'SchoogleID: ' + ev.schoogleEventId + ' (copied!)';
+              setTimeout(() => {
+                schoogleIdDisplay.textContent = originalText;
+              }, 1500);
+            });
+          });
+        } else {
+          schoogleIdDisplay.textContent = 'SchoogleID: (not set)';
+        }
+        
+        // Add Invitations display
+        const invitesDisplay = document.createElement('div');
+        invitesDisplay.style.fontSize = '11px';
+        invitesDisplay.style.color = 'var(--muted)';
+        invitesDisplay.style.marginBottom = '8px';
+        invitesDisplay.style.fontFamily = 'monospace';
+        if (ev.inviteEmails && Array.isArray(ev.inviteEmails) && ev.inviteEmails.length > 0) {
+          invitesDisplay.textContent = 'Invites: ' + ev.inviteEmails.join(', ');
+          invitesDisplay.title = 'Click to copy emails';
+          invitesDisplay.style.cursor = 'pointer';
+          invitesDisplay.addEventListener('click', () => {
+            const emailsText = ev.inviteEmails.join(', ');
+            navigator.clipboard.writeText(emailsText).then(() => {
+              const originalText = invitesDisplay.textContent;
+              invitesDisplay.textContent = 'Invites: ' + emailsText + ' (copied!)';
+              setTimeout(() => {
+                invitesDisplay.textContent = originalText;
+              }, 1500);
+            }).catch(() => {
+              // Fallback for older browsers
+              const textArea = document.createElement('textarea');
+              textArea.value = emailsText;
+              document.body.appendChild(textArea);
+              textArea.select();
+              document.execCommand('copy');
+              document.body.removeChild(textArea);
+              const originalText = invitesDisplay.textContent;
+              invitesDisplay.textContent = 'Invites: ' + emailsText + ' (copied!)';
+              setTimeout(() => {
+                invitesDisplay.textContent = originalText;
+              }, 1500);
+            });
+          });
+        } else if (ev.attendees && Array.isArray(ev.attendees) && ev.attendees.length > 0) {
+          const emails = ev.attendees.map(a => a.email || a).filter(e => e);
+          if (emails.length > 0) {
+            invitesDisplay.textContent = 'Attendees: ' + emails.join(', ');
+            invitesDisplay.title = 'Click to copy emails';
+            invitesDisplay.style.cursor = 'pointer';
+            invitesDisplay.addEventListener('click', () => {
+              const emailsText = emails.join(', ');
+              navigator.clipboard.writeText(emailsText).then(() => {
+                const originalText = invitesDisplay.textContent;
+                invitesDisplay.textContent = 'Attendees: ' + emailsText + ' (copied!)';
+                setTimeout(() => {
+                  invitesDisplay.textContent = originalText;
+                }, 1500);
+              }).catch(() => {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = emailsText;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                const originalText = invitesDisplay.textContent;
+                invitesDisplay.textContent = 'Attendees: ' + emailsText + ' (copied!)';
+                setTimeout(() => {
+                  invitesDisplay.textContent = originalText;
+                }, 1500);
+              });
+            });
+          } else {
+            invitesDisplay.textContent = 'Invites: (none)';
+          }
+        } else {
+          invitesDisplay.textContent = 'Invites: (none)';
+        }
+        
+        displayContainer.appendChild(titleDisplay);
+        displayContainer.appendChild(timeDisplay);
+        displayContainer.appendChild(colorDisplay);
+        displayContainer.appendChild(schoogleIdDisplay);
+        displayContainer.appendChild(invitesDisplay);
+        
+        // Create edit container (hidden initially)
+        const editContainer = document.createElement('div');
+        editContainer.className = 'event-edit';
+        editContainer.style.display = 'none';
+        
+        // Title input
+        const titleInput = document.createElement('input');
+        titleInput.type = 'text';
+        titleInput.value = ev.title;
+        titleInput.className = 'event-title-edit';
+        titleInput.style.marginBottom = '8px';
+        titleInput.style.width = '100%';
+        
+        // Date and time inputs
+        const dateTimeContainer = document.createElement('div');
+        dateTimeContainer.style.display = 'grid';
+        dateTimeContainer.style.gridTemplateColumns = '1fr 1fr 1fr 1fr';
+        dateTimeContainer.style.gap = '8px';
+        dateTimeContainer.style.marginBottom = '8px';
+        
+        const startDateInput = document.createElement('input');
+        startDateInput.type = 'date';
+        const startDateTime = formatDateTimeForEdit(ev.start);
+        startDateInput.value = startDateTime.date;
+        
+        const startTimeInput = document.createElement('input');
+        startTimeInput.type = 'time';
+        startTimeInput.value = startDateTime.time;
+        
+        const endDateInput = document.createElement('input');
+        endDateInput.type = 'date';
+        const endDateTime = formatDateTimeForEdit(ev.end);
+        endDateInput.value = endDateTime.date;
+        
+        const endTimeInput = document.createElement('input');
+        endTimeInput.type = 'time';
+        endTimeInput.value = endDateTime.time;
+        
+        dateTimeContainer.appendChild(startDateInput);
+        dateTimeContainer.appendChild(startTimeInput);
+        dateTimeContainer.appendChild(endDateInput);
+        dateTimeContainer.appendChild(endTimeInput);
+        
+        // Color picker for individual events
+        const colorContainer = document.createElement('div');
+        colorContainer.style.marginBottom = '8px';
+        
+        const colorLabel = document.createElement('label');
+        colorLabel.textContent = 'Color:';
+        colorLabel.style.display = 'block';
+        colorLabel.style.marginBottom = '4px';
+        colorLabel.style.fontSize = '12px';
+        
+        const colorPicker = createColorPicker(ev.colorId || '1', null);
+        colorPicker.element.style.maxHeight = '120px';
+        colorPicker.element.style.gridTemplateColumns = 'repeat(auto-fit, minmax(80px, 1fr))';
+        
+        colorContainer.appendChild(colorLabel);
+        colorContainer.appendChild(colorPicker.element);
+        
+        // SchoogleID input
+        const schoogleIdContainer = document.createElement('div');
+        schoogleIdContainer.style.marginBottom = '8px';
+        
+        const schoogleIdLabel = document.createElement('label');
+        schoogleIdLabel.textContent = 'SchoogleID:';
+        schoogleIdLabel.style.display = 'block';
+        schoogleIdLabel.style.marginBottom = '4px';
+        schoogleIdLabel.style.fontSize = '12px';
+        
+        const schoogleIdInput = document.createElement('input');
+        schoogleIdInput.type = 'text';
+        schoogleIdInput.value = ev.schoogleEventId || '';
+        schoogleIdInput.style.width = '100%';
+        schoogleIdInput.style.padding = '4px 8px';
+        schoogleIdInput.style.border = '1px solid var(--border)';
+        schoogleIdInput.style.borderRadius = '4px';
+        schoogleIdInput.style.background = '#0f1525';
+        schoogleIdInput.style.color = 'var(--text)';
+        schoogleIdInput.style.fontFamily = 'monospace';
+        schoogleIdInput.style.fontSize = '11px';
+        schoogleIdInput.placeholder = 'Enter SchoogleID...';
+        
+        schoogleIdContainer.appendChild(schoogleIdLabel);
+        schoogleIdContainer.appendChild(schoogleIdInput);
+        
+        // Invitations input
+        const invitesContainer = document.createElement('div');
+        invitesContainer.style.marginBottom = '8px';
+        
+        const invitesLabel = document.createElement('label');
+        invitesLabel.textContent = 'Invitations (comma-separated emails):';
+        invitesLabel.style.display = 'block';
+        invitesLabel.style.marginBottom = '4px';
+        invitesLabel.style.fontSize = '12px';
+        
+        const invitesInput = document.createElement('textarea');
+        invitesInput.style.width = '100%';
+        invitesInput.style.height = '60px';
+        invitesInput.style.padding = '4px 8px';
+        invitesInput.style.border = '1px solid var(--border)';
+        invitesInput.style.borderRadius = '4px';
+        invitesInput.style.background = '#0f1525';
+        invitesInput.style.color = 'var(--text)';
+        invitesInput.style.fontFamily = 'inherit';
+        invitesInput.style.fontSize = '12px';
+        invitesInput.style.resize = 'vertical';
+        invitesInput.placeholder = 'user1@example.com, user2@example.com';
+        
+        // Pre-populate with existing invites
+        if (ev.inviteEmails && Array.isArray(ev.inviteEmails)) {
+          invitesInput.value = ev.inviteEmails.join(', ');
+        } else if (ev.attendees && Array.isArray(ev.attendees)) {
+          const emails = ev.attendees.map(a => a.email || a).filter(e => e);
+          invitesInput.value = emails.join(', ');
+        }
+        
+        invitesContainer.appendChild(invitesLabel);
+        invitesContainer.appendChild(invitesInput);
+        
+        editContainer.appendChild(titleInput);
+        editContainer.appendChild(dateTimeContainer);
+        editContainer.appendChild(colorContainer);
+        editContainer.appendChild(schoogleIdContainer);
+        editContainer.appendChild(invitesContainer);
+        
+        // Button container
+        const buttonContainer = document.createElement('div');
+        buttonContainer.style.display = 'flex';
+        buttonContainer.style.gap = '8px';
+        buttonContainer.style.marginTop = '8px';
 
         const editBtn = document.createElement('button');
         editBtn.textContent = 'Edit';
         editBtn.className = 'btn mini';
         editBtn.addEventListener('click', () => {
-          const newTitle = prompt('New title', ev.title);
-          if (!newTitle) return;
-          showSpinner(true);
-          rpc('updateCalendarEvent', document.getElementById('viewCalendarSelect').value, ev.id, newTitle)
-            .then(() => {
-              ev.title = newTitle;
-              renderViewEvents(events);
-            })
-            .catch(err => console.error('updateCalendarEvent failed', err))
-            .finally(() => showSpinner(false));
+          if (editBtn.textContent === 'Edit') {
+            // Switch to edit mode
+            displayContainer.style.display = 'none';
+            editContainer.style.display = 'block';
+            editBtn.textContent = 'Save';
+            editBtn.className = 'btn success mini';
+          } else {
+            // Save changes
+            editBtn.disabled = true;
+            editBtn.textContent = 'Saving...';
+            showSpinner(true);
+            
+            const updates = {
+              title: titleInput.value,
+              startDate: startDateInput.value,
+              startTime: startTimeInput.value,
+              endDate: endDateInput.value,
+              endTime: endTimeInput.value,
+              colorId: colorPicker.getSelectedColor(),
+              schoogleEventId: schoogleIdInput.value.trim() || null,
+              inviteEmails: (() => {
+                const emailString = invitesInput.value.trim();
+                if (!emailString) return null;
+                const emails = emailString.split(',').map(email => email.trim()).filter(email => {
+                  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                  return emailRegex.test(email);
+                });
+                return emails.length > 0 ? emails : null;
+              })()
+            };
+            
+            rpc('updateCalendarEventFull', document.getElementById('viewCalendarSelect').value, ev.id, updates)
+              .then(() => {
+                // Update local event data
+                ev.title = updates.title;
+                ev.colorId = updates.colorId;
+                ev.schoogleEventId = updates.schoogleEventId;
+                ev.inviteEmails = updates.inviteEmails;
+                loadViewEvents(document.getElementById('viewCalendarSelect').value); // Reload to get fresh data
+              })
+              .catch(err => {
+                console.error('updateCalendarEventFull failed', err);
+                editBtn.disabled = false;
+                editBtn.textContent = 'Save';
+                alert('Update failed: ' + (err && err.message ? err.message : err));
+              })
+              .finally(() => showSpinner(false));
+          }
         });
+        
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.className = 'btn mini';
+        cancelBtn.style.display = 'none';
+        cancelBtn.addEventListener('click', () => {
+          // Switch back to display mode
+          displayContainer.style.display = 'block';
+          editContainer.style.display = 'none';
+          editBtn.textContent = 'Edit';
+          editBtn.className = 'btn mini';
+          cancelBtn.style.display = 'none';
+          
+          // Reset form values
+          titleInput.value = ev.title;
+          const resetStartDateTime = formatDateTimeForEdit(ev.start);
+          const resetEndDateTime = formatDateTimeForEdit(ev.end);
+          startDateInput.value = resetStartDateTime.date;
+          startTimeInput.value = resetStartDateTime.time;
+          endDateInput.value = resetEndDateTime.date;
+          endTimeInput.value = resetEndDateTime.time;
+          schoogleIdInput.value = ev.schoogleEventId || '';
+          // Reset invitations
+          if (ev.inviteEmails && Array.isArray(ev.inviteEmails)) {
+            invitesInput.value = ev.inviteEmails.join(', ');
+          } else if (ev.attendees && Array.isArray(ev.attendees)) {
+            const emails = ev.attendees.map(a => a.email || a).filter(e => e);
+            invitesInput.value = emails.join(', ');
+          } else {
+            invitesInput.value = '';
+          }
+        });
+        
+        // Show/hide cancel button based on edit mode
+        const observer = new MutationObserver(() => {
+          if (editContainer.style.display === 'none') {
+            cancelBtn.style.display = 'none';
+          } else {
+            cancelBtn.style.display = 'inline-block';
+          }
+        });
+        observer.observe(editContainer, { attributes: true, attributeFilter: ['style'] });
 
         const delBtn = document.createElement('button');
         delBtn.textContent = 'Delete';
         delBtn.className = 'btn danger mini';
         delBtn.addEventListener('click', () => {
           if (!confirm('Delete this event?')) return;
+          delBtn.disabled = true;
+          delBtn.textContent = 'Deleting...';
           showSpinner(true);
           rpc('deleteCalendarEvent', document.getElementById('viewCalendarSelect').value, ev.id)
             .then(() => {
@@ -1266,14 +2865,30 @@
               if (idx > -1) events.splice(idx, 1);
               renderViewEvents(events);
             })
-            .catch(err => console.error('deleteCalendarEvent failed', err))
+            .catch(err => {
+              console.error('deleteCalendarEvent failed', err);
+              delBtn.disabled = false;
+              delBtn.textContent = 'Delete';
+              alert('Delete failed: ' + (err && err.message ? err.message : err));
+            })
             .finally(() => showSpinner(false));
         });
+        
+        const openBtn = document.createElement('button');
+        openBtn.textContent = 'Open';
+        openBtn.className = 'btn mini';
+        openBtn.addEventListener('click', () => {
+          window.open(ev.htmlLink, '_blank');
+        });
 
-        li.appendChild(timeSpan);
-        li.appendChild(openLink);
-        li.appendChild(editBtn);
-        li.appendChild(delBtn);
+        buttonContainer.appendChild(editBtn);
+        buttonContainer.appendChild(cancelBtn);
+        buttonContainer.appendChild(delBtn);
+        buttonContainer.appendChild(openBtn);
+
+        li.appendChild(displayContainer);
+        li.appendChild(editContainer);
+        li.appendChild(buttonContainer);
         ul.appendChild(li);
       });
 
@@ -1362,8 +2977,9 @@
             const formData = collectFormData();
             console.log('Form data after loading timetable:', formData);
           }, 100);
+          showInlineStatus('addStatusMessage', 'Loaded ' + ((rows || []).length) + ' timetable row(s).', 'success');
         })
-        .catch(err => { console.error('Loading timetable failed', err); alert('Failed to load timetable.'); })
+        .catch(err => { console.error('Loading timetable failed', err); showInlineStatus('addStatusMessage', 'Failed to load timetable rows.', 'danger'); alert('Failed to load timetable.'); })
         .finally(() => showSpinner(false));
     }
 
@@ -1376,6 +2992,177 @@
       if (e.target === modal) hideModal();
     });
   }
+
+  // ===== UPDATE TAB EVENT WIRING =====
+  function initUpdateTab() {
+    // Add row
+    document.getElementById('updateAddRowBtn').addEventListener('click', function() { addUpdateRow(); });
+
+    // Load My Timetable
+    document.getElementById('updateLoadMyTimetableBtn').addEventListener('click', function() {
+      showInlineStatus('updateStatusMessage', '', '');
+      showUpdateLoadConfirmModal('Load My Timetable', 'Load your own timetable?', function() {
+        return rpc('getInitialData').then(function(data) { return data.userTimetable || []; });
+      });
+    });
+
+    // Load Teacher Timetable
+    try {
+      var otherSelect = document.getElementById('updateOtherTeacherSelect');
+      var loadOtherBtn = document.getElementById('updateLoadOtherBtn');
+      if (otherSelect && loadOtherBtn) {
+        loadOtherBtn.addEventListener('click', function() {
+          var email = (otherSelect.value || '').trim();
+          if (!email) { showInlineStatus('updateStatusMessage', 'Select a teacher timetable first.', 'warning'); return; }
+          showUpdateLoadConfirmModal('Load Teacher Timetable', 'Load timetable for ' + otherSelect.options[otherSelect.selectedIndex].text + '?', function() { return rpc('getTeacherTimetable', email); });
+        });
+      }
+    } catch (e) {}
+
+    // Load Class Timetable
+    try {
+      var classSelect = document.getElementById('updateClassSelect');
+      var loadClassBtn = document.getElementById('updateLoadClassBtn');
+      if (classSelect && loadClassBtn) {
+        loadClassBtn.addEventListener('click', function() {
+          var className = (classSelect.value || '').trim();
+          if (!className) { showInlineStatus('updateStatusMessage', 'Select a class timetable first.', 'warning'); return; }
+          showUpdateLoadConfirmModal('Load Class Timetable', 'Load timetable for ' + className + '?', function() { return rpc('getClassTimetable', className); });
+        });
+      }
+    } catch (e) {}
+
+    // Load Room Timetable
+    try {
+      var roomSelect = document.getElementById('updateRoomSelect');
+      var loadRoomBtn = document.getElementById('updateLoadRoomBtn');
+      if (roomSelect && loadRoomBtn) {
+        loadRoomBtn.addEventListener('click', function() {
+          var roomName = (roomSelect.value || '').trim();
+          if (!roomName) { showInlineStatus('updateStatusMessage', 'Select a room timetable first.', 'warning'); return; }
+          showUpdateLoadConfirmModal('Load Room Timetable', 'Load timetable for ' + roomName + '?', function() { return rpc('getRoomTimetable', roomName); });
+        });
+      }
+    } catch (e) {}
+
+    // Preview button - compare existing with generated events
+    document.getElementById('updatePreviewBtn').addEventListener('click', function() {
+      var data = collectUpdateFormData();
+      if (!data.length) { showInlineStatus('updateStatusMessage', 'Please enter or load at least one timetable row before previewing.', 'warning'); return; }
+      var calId = document.getElementById('updateCalendarSelect').value;
+      if (!calId) { showInlineStatus('updateStatusMessage', 'Please select a Schoogle calendar first.', 'warning'); return; }
+      var from = document.getElementById('updateFromDate').value;
+      var to = document.getElementById('updateToDate').value;
+      showSpinner(true);
+      Promise.all([
+        rpc('generatePreviewEvents', { items: data, from: from, to: to }),
+        rpc('getEventsFromCalendarInRange', calId, from, to)
+      ]).then(function(results) {
+        var previewResult = results[0];
+        var existingEvents = results[1] || [];
+        // Normalize preview events
+        var previewEvents = [];
+        if (Array.isArray(previewResult)) previewEvents = previewResult;
+        else if (previewResult && Array.isArray(previewResult.events)) previewEvents = previewResult.events;
+        else if (previewResult && typeof previewResult === 'object') {
+          var keys = Object.keys(previewResult);
+          for (var k = 0; k < keys.length; k++) {
+            if (Array.isArray(previewResult[keys[k]])) { previewEvents = previewResult[keys[k]]; break; }
+          }
+        }
+        var comparison = compareEvents(existingEvents, previewEvents);
+        state.updateComparison = comparison;
+        state.updateCalendarId = calId;
+        document.getElementById('updateFormSection').style.display = 'none';
+        document.getElementById('updateCompareSection').style.display = '';
+        setStepperProgress('updateStepper', 2);
+        showInlineStatus('updateStatusMessage', 'Step 2: Review differences, then apply selected updates.', 'info');
+        renderUpdateComparison(comparison);
+      }).catch(function(err) {
+        console.error('Update preview failed', err);
+        showInlineStatus('updateStatusMessage', 'Failed to generate comparison. Please check your date range and timetable rows.', 'danger');
+        alert('Failed to generate comparison: ' + (err && err.message ? err.message : err));
+      }).finally(function() { showSpinner(false); });
+    });
+
+    // Back button
+    document.getElementById('updateBackBtn').addEventListener('click', function() {
+      document.getElementById('updateCompareSection').style.display = 'none';
+      document.getElementById('updateFormSection').style.display = '';
+      setStepperProgress('updateStepper', 1);
+    });
+
+    // Select All checkbox
+    document.getElementById('updateSelectAll').addEventListener('change', function(e) {
+      var checked = e.target.checked;
+      document.querySelectorAll('#updateUnmatchedSection input[type="checkbox"].update-item-check').forEach(function(cb) { cb.checked = checked; });
+    });
+
+    // Delete and Create All button
+    document.getElementById('updateDeleteCreateAllBtn').addEventListener('click', function() {
+      var comparison = state.updateComparison;
+      var calId = state.updateCalendarId;
+      if (!comparison || !calId) return;
+
+      var checkedBoxes = document.querySelectorAll('#updateUnmatchedSection input[type="checkbox"].update-item-check:checked');
+      var items = [];
+      checkedBoxes.forEach(function(cb) { items.push({ type: cb.dataset.type, index: parseInt(cb.dataset.index) }); });
+      if (!items.length) { alert('No items selected.'); return; }
+
+      var toDelete = [];
+      var toCreate = [];
+      items.forEach(function(item) {
+        if (item.type === 'orphaned') {
+          toDelete.push(comparison.orphanedExisting[item.index]);
+        } else if (item.type === 'mismatched') {
+          toDelete.push(comparison.mismatched[item.index].existing);
+          toCreate.push(comparison.mismatched[item.index].preview);
+        } else if (item.type === 'new') {
+          toCreate.push(comparison.newPreview[item.index]);
+        }
+      });
+
+      if (!confirm('This will delete ' + toDelete.length + ' existing event(s) and create ' + toCreate.length + ' new event(s). Proceed?')) return;
+
+      setStepperProgress('updateStepper', 3);
+      showInlineStatus('updateStatusMessage', 'Step 3: Applying selected updates...', 'info');
+      showSpinner(true);
+      var deletePromise = toDelete.length > 0
+        ? rpc('deleteEventsByIds', calId, toDelete.map(function(ev) { return ev.id; }))
+        : Promise.resolve({ deleted: 0 });
+
+      deletePromise.then(function(deleteResult) {
+        if (toCreate.length > 0) {
+          var payloadEvents = toCreate.map(function(ev) {
+            var copy = Object.assign({}, ev);
+            try { if (copy.startDate && copy.startTime) copy.startDateTime = new Date(copy.startDate + 'T' + copy.startTime + ':00').toISOString(); } catch(e) {}
+            try { if (copy.startDate && copy.endTime) copy.endDateTime = new Date(copy.startDate + 'T' + copy.endTime + ':00').toISOString(); } catch(e) {}
+            return copy;
+          });
+          return rpc('ensureUserWorkerTrigger')
+            .then(function() { return rpc('enqueueJob', payloadEvents, calId); })
+            .then(function(jobId) {
+              showInlineStatus('updateStatusMessage', 'Deleted ' + (deleteResult.deleted || 0) + ' event(s). Queued ' + toCreate.length + ' event(s) for creation (Job: ' + jobId + ').', 'success');
+              try { startJobsPoller(); } catch(e) {}
+              try { rpc('processUserJobs').catch(function(){}); } catch(e) {}
+            });
+        } else {
+          showInlineStatus('updateStatusMessage', 'Deleted ' + (deleteResult.deleted || 0) + ' event(s). No new events to create.', 'success');
+        }
+      }).then(function() {
+        // Go back to form
+        document.getElementById('updateCompareSection').style.display = 'none';
+        document.getElementById('updateFormSection').style.display = '';
+        setStepperProgress('updateStepper', 1);
+      }).catch(function(err) {
+        console.error('Delete and create failed', err);
+        showInlineStatus('updateStatusMessage', 'Update operation failed. Please retry.', 'danger');
+        alert('Operation failed: ' + (err && err.message ? err.message : err));
+      }).finally(function() { showSpinner(false); });
+    });
+  }
+  // Wire up update tab when DOM is ready
+  try { initUpdateTab(); } catch(e) { console.warn('initUpdateTab failed', e); }
 
   window.addEventListener('load', init);
 })();
