@@ -24,6 +24,7 @@ const SHEET_TIMETABLE_MASTER = 'TIMETABLE_MASTER';  // Main timetable: EMAIL, te
 const SHEET_DAYS = 'Days';                          // Date mapping: DAY, Date, Day Type, RAW DAY TITLE, CORE DAY, CycleNum
 const SHEET_DAY_TIMES = 'DayTimes';                 // Time periods: DayType, PERIOD NAME, START TIME, END TIME, OLD PERIOD NAME, WEB Display Name, Order
 const SHEET_PERIOD_NAMES = 'PeriodNames';           // Period name definitions
+const SHEET_DATE_WINDOWS = 'DateWindows';           // Date presets: Display Name, Date From, Date To
 
 // System Management Sheets
 const SHEET_JOBS = 'JOBS';                          // Job queue for background processing
@@ -205,7 +206,48 @@ function getInitialData() {
     console.log('Using fallback date range:', defaultFrom, 'to', defaultTo);
   }
 
-  return { periods: periods, userTimetable: userTimetable, userEmail: email, defaultFrom: defaultFrom, defaultTo: defaultTo, teachers: teachers };
+  return {
+    periods: periods,
+    userTimetable: userTimetable,
+    userEmail: email,
+    defaultFrom: defaultFrom,
+    defaultTo: defaultTo,
+    teachers: teachers,
+    dateWindows: getDateWindows()
+  };
+}
+
+// Return date window presets from DateWindows sheet in client-safe yyyy-MM-dd format
+function getDateWindows() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName(SHEET_DATE_WINDOWS);
+  if (!sh) return [];
+
+  var vals = sh.getDataRange().getValues();
+  if (!vals || vals.length < 2) return [];
+
+  var tz = Session.getScriptTimeZone() || 'Asia/Hong_Kong';
+  var out = [];
+  for (var i = 1; i < vals.length; i++) {
+    var row = vals[i] || [];
+    var name = (row[0] || '').toString().trim();
+    var fromRaw = row[1];
+    var toRaw = row[2];
+    if (!name) continue;
+
+    var from = normalizeToDate(fromRaw);
+    var to = normalizeToDate(toRaw);
+    if (!from || !to) continue;
+
+    var fromYmd = Utilities.formatDate(from, tz, 'yyyy-MM-dd');
+    var toYmd = Utilities.formatDate(to, tz, 'yyyy-MM-dd');
+    out.push({
+      name: name,
+      from: fromYmd,
+      to: toYmd
+    });
+  }
+  return out;
 }
 
 // Return a list of teachers (email + display name)

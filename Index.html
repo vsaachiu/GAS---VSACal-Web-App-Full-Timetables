@@ -46,6 +46,22 @@
 
           <div id="formSection">
             <div class="section-instructions">Step 1: Load timetable rows (or enter rows manually). Step 2: Choose date window and preview events.</div>
+            <div class="unified-step-panel">
+              <div class="calendar-picker date-window-picker">
+                <label for="dateWindowPreset">Date Window</label>
+                <select id="dateWindowPreset"></select>
+                <input id="fromDate" type="date" aria-label="From date" title="From date" />
+                <span class="date-window-sep">to</span>
+                <input id="toDate" type="date" aria-label="To date" title="To date" />
+              </div>
+              <div class="section-instructions">Choose a date window preset or set custom dates. If you edit either date, the preset will switch to Custom.</div>
+              <div class="calendar-picker unified-calendar-picker">
+                <label for="unifiedCalendarSelect">Calendar</label>
+                <select id="unifiedCalendarSelect"></select>
+              </div>
+              <h3 id="unifiedExistingHeader" class="section-heading" style="display:none;">Existing Schoogle Events</h3>
+              <div id="unifiedExistingList" class="collapsible-list"></div>
+            </div>
             <div class="source-grid source-card-grid">
               <button id="loadMyTimetableBtn" type="button" class="source-card btn primary">My timetable</button>
               <div class="source-item source-card-wrap">
@@ -114,12 +130,6 @@
               <button id="addRowBtn" class="btn icon">＋</button>
             </div>
             <div class="date-window-help">Choose from which date to which date you wish to preview and add the above events.</div>
-            <div class="calendar-picker date-window-picker">
-              <label>Date window</label>
-              <input id="fromDate" type="date" aria-label="From date" title="From date" />
-              <span class="date-window-sep">to</span>
-              <input id="toDate" type="date" aria-label="To date" title="To date" />
-            </div>
             <div class="controls">
               <button id="previewBtn" class="btn primary">Preview Events</button>
             </div>

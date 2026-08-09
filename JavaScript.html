@@ -4,6 +4,7 @@
     periods: [],
     previewEvents: [],
     calendars: [],
+    dateWindows: [],
     userEmail: '',
     updateDefaultLoaded: false,
     updateDefaultLoadPending: false,
@@ -467,6 +468,144 @@
     }).finally(() => showSpinner(false));
   }
 
+  function parseNumericToken(raw) {
+    const m = (raw || '').toString().match(/(\d+)/);
+    return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+  }
+
+  function sortTimetableRows(rows) {
+    return (rows || []).slice().sort((a, b) => {
+      const at = (a.title || '').toString().toLowerCase();
+      const bt = (b.title || '').toString().toLowerCase();
+      const tc = at.localeCompare(bt);
+      if (tc !== 0) return tc;
+      const ad = parseNumericToken(a.day || '');
+      const bd = parseNumericToken(b.day || '');
+      if (ad !== bd) return ad - bd;
+      const ap = parseNumericToken(a.periodId || '');
+      const bp = parseNumericToken(b.periodId || '');
+      if (ap !== bp) return ap - bp;
+      return (a.periodId || '').toString().localeCompare((b.periodId || '').toString());
+    });
+  }
+
+  function populateDateWindowPresets(windows) {
+    const sel = document.getElementById('dateWindowPreset');
+    if (!sel) return;
+    sel.innerHTML = '';
+    (windows || []).forEach(w => {
+      const opt = document.createElement('option');
+      opt.value = w.name;
+      opt.textContent = w.name;
+      opt.dataset.from = w.from;
+      opt.dataset.to = w.to;
+      sel.appendChild(opt);
+    });
+    const custom = document.createElement('option');
+    custom.value = '__custom__';
+    custom.textContent = 'Custom';
+    sel.appendChild(custom);
+  }
+
+  function syncDateWindowPresetFromFields() {
+    const sel = document.getElementById('dateWindowPreset');
+    const fromEl = document.getElementById('fromDate');
+    const toEl = document.getElementById('toDate');
+    if (!sel || !fromEl || !toEl) return;
+    const from = fromEl.value || '';
+    const to = toEl.value || '';
+    let matched = false;
+    Array.from(sel.options).forEach(opt => {
+      if (opt.value === '__custom__') return;
+      if ((opt.dataset.from || '') === from && (opt.dataset.to || '') === to) {
+        sel.value = opt.value;
+        matched = true;
+      }
+    });
+    if (!matched) sel.value = '__custom__';
+  }
+
+  function applyDateWindowPreset(name) {
+    const sel = document.getElementById('dateWindowPreset');
+    const fromEl = document.getElementById('fromDate');
+    const toEl = document.getElementById('toDate');
+    if (!sel || !fromEl || !toEl) return;
+    if (name === '__custom__') return;
+    const opt = Array.from(sel.options).find(o => o.value === name);
+    if (!opt) return;
+    fromEl.value = opt.dataset.from || '';
+    toEl.value = opt.dataset.to || '';
+  }
+
+  function renderUnifiedExistingEvents(events, calendarName) {
+    const header = document.getElementById('unifiedExistingHeader');
+    const list = document.getElementById('unifiedExistingList');
+    if (!header || !list) return;
+    if (!calendarName) {
+      header.style.display = 'none';
+      list.innerHTML = '';
+      return;
+    }
+
+    header.style.display = '';
+    header.textContent = 'Existing Schoogle Events on ' + calendarName;
+    list.innerHTML = '';
+    const groups = groupByTitle(events || []);
+    const titles = Object.keys(groups).sort();
+    if (!titles.length) {
+      list.innerHTML = '<div class="no-jobs">No Schoogle events found in this date window.</div>';
+      return;
+    }
+
+    titles.forEach(title => {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = title + ' (' + groups[title].length + ')';
+      details.appendChild(summary);
+      const ul = document.createElement('ul');
+      ul.className = 'event-list';
+      groups[title].forEach(ev => {
+        const li = document.createElement('li');
+        li.className = 'event-item';
+        const titleEl = document.createElement('div');
+        titleEl.textContent = ev.title || '(Untitled)';
+        const timeEl = document.createElement('div');
+        timeEl.className = 'event-time';
+        timeEl.textContent = fmt(ev.start) + ' -> ' + fmt(ev.end);
+        const locEl = document.createElement('div');
+        locEl.className = 'event-time';
+        locEl.textContent = ev.location || '';
+        li.appendChild(titleEl);
+        li.appendChild(timeEl);
+        li.appendChild(locEl);
+        ul.appendChild(li);
+      });
+      details.appendChild(ul);
+      list.appendChild(details);
+    });
+  }
+
+  function loadUnifiedExistingEvents() {
+    const calSel = document.getElementById('unifiedCalendarSelect');
+    const from = document.getElementById('fromDate') && document.getElementById('fromDate').value;
+    const to = document.getElementById('toDate') && document.getElementById('toDate').value;
+    if (!calSel || !calSel.value || calSel.value === '__new__') {
+      renderUnifiedExistingEvents([], '');
+      return;
+    }
+    showSpinner(true);
+    rpc('getEventsFromCalendarInRange', calSel.value, from, to)
+      .then(events => {
+        const name = calSel.options[calSel.selectedIndex] ? calSel.options[calSel.selectedIndex].textContent : 'Selected Calendar';
+        renderUnifiedExistingEvents(events || [], name);
+      })
+      .catch(err => {
+        console.error('loadUnifiedExistingEvents failed', err);
+        renderUnifiedExistingEvents([], calSel.options[calSel.selectedIndex] ? calSel.options[calSel.selectedIndex].textContent : 'Selected Calendar');
+      })
+      .finally(() => showSpinner(false));
+  }
+
   function switchTab(tabId) {
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabId));
     document.querySelectorAll('.tab-content').forEach(el => el.classList.toggle('active', el.id === tabId));
@@ -918,6 +1057,7 @@
     showSpinner(true);
     return dataFetcher()
       .then(function(rows) {
+        rows = sortTimetableRows(rows);
         var container = document.getElementById('updateFormRows');
         if (shouldReplace) {
           Array.from(container.querySelectorAll('.form-row')).filter(function(r) { return !r.dataset.template && !r.classList.contains('header'); }).forEach(function(r) { r.remove(); });
@@ -969,6 +1109,7 @@
       showSpinner(true);
       dataFetcher()
         .then(function(rows) {
+          rows = sortTimetableRows(rows);
           (rows || []).forEach(function(r, index) {
             console.log('Adding update row ' + index + ':', r);
             addUpdateRow(r);
@@ -1536,6 +1677,11 @@
         state.calendars = cals || [];
         populateCalendars(document.getElementById('calendarSelect'), state.calendars);
         populateCalendars(document.getElementById('viewCalendarSelect'), state.calendars);
+        var _unifiedCalSel = document.getElementById('unifiedCalendarSelect');
+        if (_unifiedCalSel) {
+          populateCalendars(_unifiedCalSel, state.calendars);
+          loadUnifiedExistingEvents();
+        }
         // Populate Update tab calendar select (without "Create new" option)
         var _updateCalSel = document.getElementById('updateCalendarSelect');
         if (_updateCalSel) {
@@ -1751,6 +1897,15 @@
           if (wrap) wrap.style.display = '';
         });
       }
+      const otherWrap = document.getElementById('otherLoadWrap');
+      if (otherWrap && showTeacherBtn) {
+        otherWrap.addEventListener('click', (e) => {
+          if (e.target === otherWrap) {
+            otherWrap.style.display = 'none';
+            showTeacherBtn.style.display = '';
+          }
+        });
+      }
 
       if (showClassBtn) {
         showClassBtn.addEventListener('click', () => {
@@ -1759,12 +1914,30 @@
           if (wrap) wrap.style.display = '';
         });
       }
+      const classWrap = document.getElementById('classLoadWrap');
+      if (classWrap && showClassBtn) {
+        classWrap.addEventListener('click', (e) => {
+          if (e.target === classWrap) {
+            classWrap.style.display = 'none';
+            showClassBtn.style.display = '';
+          }
+        });
+      }
 
       if (showRoomBtn) {
         showRoomBtn.addEventListener('click', () => {
           showRoomBtn.style.display = 'none';
           const wrap = document.getElementById('roomLoadWrap');
           if (wrap) wrap.style.display = '';
+        });
+      }
+      const roomWrap = document.getElementById('roomLoadWrap');
+      if (roomWrap && showRoomBtn) {
+        roomWrap.addEventListener('click', (e) => {
+          if (e.target === roomWrap) {
+            roomWrap.style.display = 'none';
+            showRoomBtn.style.display = '';
+          }
         });
       }
 
@@ -2040,15 +2213,55 @@
       if (id) loadViewEvents(id);
     });
 
+    const unifiedCalSel = document.getElementById('unifiedCalendarSelect');
+    if (unifiedCalSel) {
+      unifiedCalSel.addEventListener('change', (e) => {
+        const val = e.target.value;
+        const addCalSel = document.getElementById('calendarSelect');
+        if (addCalSel && val) {
+          addCalSel.value = val;
+          const newNameEl = document.getElementById('newCalendarName');
+          if (newNameEl) newNameEl.style.display = (val === '__new__') ? '' : 'none';
+        }
+        loadUnifiedExistingEvents();
+      });
+    }
+
+    const datePresetSel = document.getElementById('dateWindowPreset');
+    if (datePresetSel) {
+      datePresetSel.addEventListener('change', (e) => {
+        applyDateWindowPreset(e.target.value);
+        loadUnifiedExistingEvents();
+      });
+    }
+
+    const fromDateElHook = document.getElementById('fromDate');
+    const toDateElHook = document.getElementById('toDate');
+    if (fromDateElHook) {
+      fromDateElHook.addEventListener('change', () => {
+        const sel = document.getElementById('dateWindowPreset');
+        if (sel) sel.value = '__custom__';
+        loadUnifiedExistingEvents();
+      });
+    }
+    if (toDateElHook) {
+      toDateElHook.addEventListener('change', () => {
+        const sel = document.getElementById('dateWindowPreset');
+        if (sel) sel.value = '__custom__';
+        loadUnifiedExistingEvents();
+      });
+    }
+
     // Initial data load
     showSpinner(true);
     console.debug('init() starting');
     rpc('getInitialData')
       .then(data => {
         state.periods = data.periods || [];
+        state.dateWindows = data.dateWindows || [];
         state.userEmail = data.userEmail || '';
         updateWelcomeHeading();
-        addRow();
+        populateDateWindowPresets(state.dateWindows);
         setStepperProgress('addStepper', 1);
         setStepperProgress('updateStepper', 1);
         showInlineStatus('addStatusMessage', 'Step 1: Load a timetable source, then review the rows below.', 'info');
@@ -2069,6 +2282,7 @@
           toDateEl.value = data.defaultTo;
           console.log('toDate value after setting:', toDateEl.value);
         }
+        syncDateWindowPresetFromFields();
         
         // Set Update tab dates
         var _updateFromEl = document.getElementById('updateFromDate');
@@ -2078,6 +2292,7 @@
         
         hydrateSourceSelectors();
         loadCalendars();
+        loadUnifiedExistingEvents();
         // Start job polling
         try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
       })
@@ -2991,6 +3206,7 @@
       showSpinner(true);
       dataFetcher()
         .then(rows => {
+          rows = sortTimetableRows(rows);
           (rows || []).forEach((r, index) => {
             console.log(`Adding row ${index}:`, r);
             rowAdder(r);
@@ -3021,6 +3237,7 @@
       showSpinner(true);
       dataFetcher()
         .then(rows => {
+          rows = sortTimetableRows(rows);
           console.log('Timetable data response:', rows);
           console.log('Available periods for comparison:', state.periods);
           
