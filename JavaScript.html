@@ -383,6 +383,18 @@
     el.textContent = message || '';
   }
 
+  function showAccessWarning(message) {
+    const warning = document.getElementById('accessWarning');
+    if (warning) {
+      warning.style.display = '';
+      warning.innerHTML = message;
+    }
+    const onboarding = document.querySelectorAll('.onboarding-panel, .section-instructions, .tabs, .tab-content');
+    onboarding.forEach(el => {
+      if (el && el.id !== 'jobsTab') el.style.opacity = '0.65';
+    });
+  }
+
   function displayNameFromEmail(email) {
     const raw = (email || '').toString().trim();
     if (!raw) return 'Teacher';
@@ -2254,6 +2266,8 @@
       })
       .catch(err => {
         console.error('getInitialData failed', err);
+        showAccessWarning('<strong>Access required.</strong> This app is intended for staff only. You do not appear to have access to the timetable resources needed to use it. Please contact a staff member if you believe this is incorrect.');
+        showInlineStatus('addStatusMessage', 'Unable to load timetable data.', 'danger');
       })
       .finally(() => showSpinner(false));
 
