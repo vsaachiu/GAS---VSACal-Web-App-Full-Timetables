@@ -1,0 +1,3435 @@
+<script>
+(function() {
+  const state = {
+    periods: [],
+    previewEvents: [],
+    calendars: [],
+    dateWindows: [],
+    existingEventsInWindow: [],
+    unifiedComparison: null,
+    userEmail: '',
+    updateDefaultLoaded: false,
+    updateDefaultLoadPending: false,
+  };
+
+  // Toggle to disable summarization and log full RPC payloads (set true while debugging)
+  // Ensure global flag exists and default to false
+  window.RPC_DEBUG = (window && window.RPC_DEBUG) || false;
+  // Helper to toggle at runtime from console: window.setRpcDebug(true)
+  window.setRpcDebug = function(v) { window.RPC_DEBUG = !!v; console.log('setRpcDebug ->', window.RPC_DEBUG); };
+  // Alias with different casing because console users sometimes use SET/ALLCAPS
+  window.setRPCDebug = window.setRpcDebug;
+
+  // --- RPC helper: logs every server request ---
+  
+  let JOBS_POLL_TIMER = null;
+  let POLL_INTERVAL = 30000; // Default 30 seconds
+  const ACTIVE_POLL_INTERVAL = 5000; // 5 seconds when jobs are active
+  const IDLE_POLL_INTERVAL = 30000; // 30 seconds when no active jobs
+  let JOBS_POLL_LAST = [];
+  let JOBS_POLL_SCHOOGLE_URL = null;
+
+  // Helper function to create a job event item
+  function createJobEventItem(event) {
+    const item = document.createElement('div');
+    item.className = 'job-item';
+    
+    // Create the main title container (will hold title + metadata + button on same line)
+    const titleContainer = document.createElement('div');
+    titleContainer.className = 'job-title';
+    
+    // Create the title text element
+    const titleText = document.createElement('span');
+    titleText.className = 'job-title-text';
+    titleText.textContent = event.title || 'Untitled Event';
+    titleText.title = event.title || 'Untitled Event'; // Tooltip for full title
+    
+    // Create the metadata container for date and location
+    const metaContainer = document.createElement('span');
+    metaContainer.className = 'job-title-meta';
+    
+    // Format start date/time
+    let dateStr = 'No date';
+    let timeStr = '';
+    try {
+      const startDate = new Date(event.startDateTime);
+      if (!isNaN(startDate.getTime())) {
+        dateStr = startDate.toLocaleDateString();
+        timeStr = startDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+      }
+    } catch (e) { /* ignore */ }
+    
+    // Create inline metadata: date/time and location
+    const metaElements = [
+      '📅 ' + dateStr + ' ' + timeStr,
+      '📍 ' + (event.location || 'No location')
+    ];
+    
+    metaContainer.innerHTML = metaElements.map(meta => '<span class="job-meta">' + meta + '</span>').join('');
+    titleContainer.appendChild(titleText);
+    titleContainer.appendChild(metaContainer);
+    
+    // Add calendar link for completed events (on the same line)
+    if (event.status === 'done' && event.createdEventId) {
+      const calendarLink = document.createElement('button');
+      calendarLink.className = 'btn mini calendar-link';
+      calendarLink.innerHTML = '📅';
+      calendarLink.title = 'Open in Google Calendar';
+      calendarLink.onclick = () => {
+        const calUrl = 'https://calendar.google.com/calendar/u/0/r/eventedit/' + event.createdEventId;
+        window.open(calUrl, '_blank');
+      };
+      titleContainer.appendChild(calendarLink);
+    }
+    
+    item.appendChild(titleContainer);
+    
+    // Only add details section if there are errors to show
+    if (event.status === 'error' && event.error) {
+      const details = document.createElement('div');
+      details.className = 'job-details';
+      details.innerHTML = '<span class="job-meta">❌ ' + event.error + '</span>';
+      item.appendChild(details);
+    }
+    
+    return item;
+  }
+
+  // Update notification count on Active Jobs tab
+  function updateJobsNotificationCount(jobSummary) {
+    const notificationCount = document.getElementById('jobsNotificationCount');
+    if (!notificationCount) return;
+    
+    // Defensive check to ensure jobSummary is an array
+    if (!jobSummary || !Array.isArray(jobSummary)) {
+      console.warn('updateJobsNotificationCount called with invalid jobSummary:', jobSummary);
+      jobSummary = [];
+    }
+    
+    const activeJobs = jobSummary.filter(job => job.status === 'queued' || job.status === 'running');
+    const count = activeJobs.length;
+    
+    if (count > 0) {
+      notificationCount.textContent = count;
+      notificationCount.style.display = 'inline-block';
+    } else {
+      notificationCount.style.display = 'none';
+    }
+  }
+
+  // New function to update the Active Jobs UI sections
+  function updateActiveJobsUI(events) {
+    // Defensive check to ensure events is an array
+    if (!events || !Array.isArray(events)) {
+      console.warn('updateActiveJobsUI called with invalid events:', events);
+      events = [];
+    }
+    
+    // Update Schoogle spreadsheet button
+    const openBtn = document.getElementById('openSchoogleBtn');
+    if (openBtn && JOBS_POLL_SCHOOGLE_URL) {
+      openBtn.style.display = 'inline-block';
+      openBtn.onclick = () => window.open(JOBS_POLL_SCHOOGLE_URL, '_blank');
+    } else if (openBtn) {
+      openBtn.style.display = 'none';
+    }
+
+    // Group events by status
+    const queued = events.filter(e => e.status === 'queued');
+    const running = events.filter(e => e.status === 'running');
+    const completed = events.filter(e => e.status === 'done' || e.status === 'error');
+
+    // Update counts
+    const queuedCount = document.getElementById('queuedCount');
+    const runningCount = document.getElementById('runningCount');
+    const completedCount = document.getElementById('completedCount');
+    if (queuedCount) queuedCount.textContent = queued.length;
+    if (runningCount) runningCount.textContent = running.length;
+    if (completedCount) completedCount.textContent = completed.length;
+
+    // Update queued jobs list
+    const queuedList = document.getElementById('queuedJobsList');
+    if (queuedList) {
+      queuedList.innerHTML = '';
+      if (queued.length === 0) {
+        queuedList.innerHTML = '<div class="no-jobs">No jobs queued</div>';
+      } else {
+        queued.forEach(event => {
+          const item = createJobEventItem(event);
+          queuedList.appendChild(item);
+        });
+      }
+    }
+
+    // Update running jobs list
+    const runningList = document.getElementById('runningJobsList');
+    if (runningList) {
+      runningList.innerHTML = '';
+      if (running.length === 0) {
+        runningList.innerHTML = '<div class="no-jobs">No jobs running</div>';
+      } else {
+        running.forEach(event => {
+          const item = createJobEventItem(event);
+          runningList.appendChild(item);
+        });
+      }
+    }
+
+    // Update completed jobs list
+    const completedList = document.getElementById('completedJobsList');
+    if (completedList) {
+      completedList.innerHTML = '';
+      if (completed.length === 0) {
+        completedList.innerHTML = '<div class="no-jobs">No completed jobs</div>';
+      } else {
+        completed.forEach(event => {
+          const item = createJobEventItem(event);
+          completedList.appendChild(item);
+        });
+      }
+    }
+  }
+
+  // Update all job-related UI from the latest listUserJobs and schoogle url
+  function updateJobUIsFromList(jobSummary, jobEvents, schoogle) {
+    // Handle both old and new calling patterns
+    if (arguments.length === 2 && !Array.isArray(jobEvents)) {
+      // Old pattern: updateJobUIsFromList(list, schoogle)
+      schoogle = jobEvents;
+      jobEvents = [];
+      jobSummary = arguments[0];
+    }
+    
+    // Defensive checks to ensure parameters are arrays
+    if (!jobSummary || !Array.isArray(jobSummary)) {
+      console.warn('updateJobUIsFromList: jobSummary is not an array:', jobSummary);
+      jobSummary = [];
+    }
+    if (!jobEvents || !Array.isArray(jobEvents)) {
+      console.warn('updateJobUIsFromList: jobEvents is not an array:', jobEvents);
+      jobEvents = [];
+    }
+    
+    JOBS_POLL_LAST = jobSummary;
+    JOBS_POLL_SCHOOGLE_URL = (schoogle && schoogle.url) ? schoogle.url : null;
+    
+    // Update Active Jobs tab with new structure
+    updateActiveJobsUI(jobEvents);
+    
+    // Update notification count on Active Jobs tab
+    updateJobsNotificationCount(jobSummary);
+    
+    // Update create progress if any job is running
+    const running = JOBS_POLL_LAST.find(j => j.status === 'running');
+    const progress = document.getElementById('createProgress');
+    if (progress) {
+      if (running) {
+        const done = (running.progress && running.progress.done) || running.done || 0;
+        const total = (running.progress && running.progress.total) || running.total || 0;
+        const est = (running.progress && running.progress.estSeconds) || null;
+        let estText = est ? ' ETA ~ ' + Math.round(est/60) + 'm ' + (est%60) + 's' : '';
+        progress.textContent = 'Job ' + (running.id || running.jobId) + ': running — ' + done + '/' + total + (estText ? ' —' + estText : '');
+        try { document.getElementById('createBtn').disabled = true; } catch (e) {}
+      } else {
+        progress.textContent = '';
+        try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+      }
+    }
+    
+    // Update spreadsheet link in progress area if available
+    try {
+      var linkContainer = document.getElementById('createProgressLink');
+      if (!linkContainer) {
+        linkContainer = document.createElement('span');
+        linkContainer.id = 'createProgressLink';
+        progress && progress.parentNode && progress.parentNode.appendChild(linkContainer);
+      }
+      if (running && (running.spreadsheetUrl || JOBS_POLL_SCHOOGLE_URL)) {
+        linkContainer.innerHTML = '';
+        var a = document.createElement('a');
+        a.href = running.spreadsheetUrl || JOBS_POLL_SCHOOGLE_URL;
+        a.target = '_blank';
+        a.textContent = 'Open spreadsheet';
+        a.style.marginLeft = '8px';
+        linkContainer.appendChild(a);
+      } else if (linkContainer) {
+        linkContainer.innerHTML = '';
+      }
+    } catch (e) { /* ignore UI errors */ }
+    
+    // If a job just finished, reset preview state
+    const justDone = JOBS_POLL_LAST.find(j => j.status === 'done' && !j._uiDone);
+    if (justDone) {
+      justDone._uiDone = true;
+      // Removed automatic tab switch to View tab
+      // Optionally reload events for the relevant calendar
+      try {
+        // REMOVED: Job polling should NOT touch state.previewEvents
+        // Preview events should only be managed by the Add tab Preview/Create workflow
+        // state.previewEvents = []; // REMOVED - This was causing preview events to disappear
+        // const previewContainer = document.getElementById('previewContainer'); // REMOVED
+        // if (previewContainer) previewContainer.innerHTML = ''; // REMOVED
+        try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+        // Don't clear date fields - they should persist for next use
+      } catch (e) { /* ignore UI errors */ }
+    }
+  }
+
+  function startJobsPoller() {
+      if (JOBS_POLL_TIMER) return; // already running
+      const poll = () => {
+        Promise.all([
+          rpc('listUserJobs').then(result => Array.isArray(result) ? result : []).catch(() => []),
+          rpc('listUserJobEvents').then(result => Array.isArray(result) ? result : []).catch(() => []),
+          rpc('getSchoogleSpreadsheetUrl').catch(() => ({ url: null }))
+        ]).then(([jobSummary, jobEvents, schoogle]) => {
+          updateJobUIsFromList(jobSummary, jobEvents, schoogle);
+          adjustPollingRate(jobSummary);
+        });
+      };
+      JOBS_POLL_TIMER = setInterval(poll, POLL_INTERVAL);
+      poll(); // Initial fetch
+    }
+
+    function adjustPollingRate(jobSummary) {
+      // Defensive check to ensure jobSummary is an array
+      if (!jobSummary || !Array.isArray(jobSummary)) {
+        console.warn('adjustPollingRate called with invalid jobSummary:', jobSummary);
+        jobSummary = [];
+      }
+      
+      const activeJobs = jobSummary.filter(job => job.status === 'queued' || job.status === 'running');
+      const newInterval = activeJobs.length > 0 ? ACTIVE_POLL_INTERVAL : IDLE_POLL_INTERVAL;
+      
+      if (newInterval !== POLL_INTERVAL) {
+        console.log('Adjusting poll rate from ' + POLL_INTERVAL + 'ms to ' + newInterval + 'ms (' + activeJobs.length + ' active jobs)');
+        POLL_INTERVAL = newInterval;
+        
+        // Restart polling with new interval
+        if (JOBS_POLL_TIMER) {
+          clearInterval(JOBS_POLL_TIMER);
+          JOBS_POLL_TIMER = setInterval(() => {
+            Promise.all([
+              rpc('listUserJobs').then(result => Array.isArray(result) ? result : []).catch(() => []),
+              rpc('listUserJobEvents').then(result => Array.isArray(result) ? result : []).catch(() => []),
+              rpc('getSchoogleSpreadsheetUrl').catch(() => ({ url: null }))
+            ]).then(([jobSummary, jobEvents, schoogle]) => {
+              updateJobUIsFromList(jobSummary, jobEvents, schoogle);
+              adjustPollingRate(jobSummary);
+            });
+          }, POLL_INTERVAL);
+        }
+      }
+    }
+    
+    function summarize(val, path = '') {
+    try {
+      if (val == null) return val;
+      if (typeof val === 'string') return val.length > 500 ? val.slice(0, 500) + '…' : val;
+      if (Array.isArray(val)) return { type: 'Array', length: val.length, sample: val.slice(0, 5) };
+      if (typeof val === 'object') {
+        const out = {}; let c = 0;
+        for (const k of Object.keys(val)) { if (c++ >= 10) break; out[k] = summarize(val[k], path + '.' + k); }
+        return out;
+      }
+      return val;
+    } catch (e) { return '[unserializable]'; }
+  }
+
+  function rpc(name, ...args) {
+    const id = Math.random().toString(36).slice(2, 8);
+    const start = (window.performance && performance.now ? performance.now() : Date.now());
+    // When RPC_DEBUG is true, log full request bodies; otherwise use summarized output.
+    try {
+      const reqLog = (window && window.RPC_DEBUG) ? args : summarize(args);
+      console.log('[RPC:' + name + '#' + id + '] Request', reqLog);
+    } catch (e) { console.log('[RPC:' + name + '#' + id + '] Request (unserializable)', args); }
+    return new Promise((resolve, reject) => {
+      try {
+        google.script.run
+          .withSuccessHandler(result => {
+            const dur = Math.round(((window.performance && performance.now ? performance.now() : Date.now()) - start));
+            try {
+              const resLog = (window && window.RPC_DEBUG) ? result : summarize(result);
+              console.log('[RPC:' + name + '#' + id + '] Success in ' + dur + 'ms', resLog);
+            } catch (e) { console.log('[RPC:' + name + '#' + id + '] Success in ' + dur + 'ms (unserializable)', result); }
+            resolve(result);
+          })
+          .withFailureHandler(err => {
+            const dur = Math.round(((window.performance && performance.now ? performance.now() : Date.now()) - start));
+            try {
+              const errLog = (window && window.RPC_DEBUG) ? err : summarize(err);
+              console.error('[RPC:' + name + '#' + id + '] Failure in ' + dur + 'ms', errLog);
+            } catch (e) { console.error('[RPC:' + name + '#' + id + '] Failure in ' + dur + 'ms (unserializable)', err); }
+            reject(err);
+          })[name](...args);
+      } catch (err) {
+        console.error('[RPC:' + name + '#' + id + '] Invocation error', err);
+        reject(err);
+      }
+    });
+  }
+
+  function showSpinner(show) {
+    document.getElementById('spinner').style.display = show ? 'flex' : 'none';
+  console.debug('Spinner', { show });
+  }
+
+  function showInlineStatus(targetId, message, type) {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    el.style.display = message ? '' : 'none';
+    el.className = 'status-message' + (type ? ' ' + type : '');
+    el.textContent = message || '';
+  }
+
+  function showAccessWarning(message) {
+    const warning = document.getElementById('accessWarning');
+    if (warning) {
+      warning.style.display = '';
+      warning.innerHTML = message;
+    }
+    const onboarding = document.querySelectorAll('.onboarding-panel, .section-instructions, .tabs, .tab-content');
+    onboarding.forEach(el => {
+      if (el && el.id !== 'jobsTab') el.style.opacity = '0.65';
+    });
+  }
+
+  function displayNameFromEmail(email) {
+    const raw = (email || '').toString().trim();
+    if (!raw) return 'Teacher';
+    const local = raw.split('@')[0] || raw;
+    return local.charAt(0).toUpperCase() + local.slice(1);
+  }
+
+  function updateWelcomeHeading() {
+    const el = document.getElementById('welcomeHeading');
+    if (!el) return;
+    const label = displayNameFromEmail(state.userEmail);
+    el.textContent = 'Hello, ' + label + '!';
+  }
+
+  function updateExistingEventsHeader() {
+    const hdr = document.getElementById('existingEventsHeader');
+    const sel = document.getElementById('viewCalendarSelect');
+    if (!hdr || !sel) return;
+    const label = sel.options && sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex].text : '(no calendar selected)';
+    const from = (document.getElementById('fromDate') || {}).value || '';
+    const to = (document.getElementById('toDate') || {}).value || '';
+    const range = (from || to) ? (' [' + (from || 'start') + ' to ' + (to || 'end') + ']') : '';
+    hdr.textContent = 'Existing Schoogle Events on ' + (label || '(no calendar selected)') + range;
+  }
+
+  function naturalNum(s) {
+    const m = (s || '').toString().match(/(\d+)/);
+    return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+  }
+
+  function sortTimetableRows(rows) {
+    return (rows || []).slice().sort((a, b) => {
+      const ta = (a.title || '').toString().toLowerCase();
+      const tb = (b.title || '').toString().toLowerCase();
+      if (ta < tb) return -1;
+      if (ta > tb) return 1;
+      const da = naturalNum(a.day);
+      const db = naturalNum(b.day);
+      if (da < db) return -1;
+      if (da > db) return 1;
+      const pa = naturalNum(a.periodId);
+      const pb = naturalNum(b.periodId);
+      if (pa < pb) return -1;
+      if (pa > pb) return 1;
+      return 0;
+    });
+  }
+
+  function setupDateWindowPreset(defaultFrom, defaultTo) {
+    const presetSel = document.getElementById('dateWindowPreset');
+    const fromEl = document.getElementById('fromDate');
+    const toEl = document.getElementById('toDate');
+    if (!presetSel || !fromEl || !toEl) return;
+
+    presetSel.innerHTML = '';
+    (state.dateWindows || []).forEach((w, idx) => {
+      const opt = document.createElement('option');
+      opt.value = w.displayName;
+      opt.textContent = w.displayName;
+      opt.dataset.from = w.from;
+      opt.dataset.to = w.to;
+      presetSel.appendChild(opt);
+    });
+    const customOpt = document.createElement('option');
+    customOpt.value = '__custom__';
+    customOpt.textContent = 'Custom';
+    presetSel.appendChild(customOpt);
+
+    if (state.dateWindows.length) {
+      fromEl.value = state.dateWindows[0].from;
+      toEl.value = state.dateWindows[0].to;
+      presetSel.value = state.dateWindows[0].displayName;
+    } else {
+      fromEl.value = defaultFrom || '';
+      toEl.value = defaultTo || '';
+      presetSel.value = '__custom__';
+    }
+
+    presetSel.addEventListener('change', () => {
+      if (presetSel.value === '__custom__') return;
+      const selected = Array.from(presetSel.options).find(o => o.value === presetSel.value);
+      if (!selected) return;
+      fromEl.value = selected.dataset.from || fromEl.value;
+      toEl.value = selected.dataset.to || toEl.value;
+      updateExistingEventsHeader();
+      const calId = (document.getElementById('viewCalendarSelect') || {}).value;
+      if (calId) loadViewEvents(calId);
+    });
+
+    function maybeSetCustom() {
+      const matched = (state.dateWindows || []).find(w => w.from === fromEl.value && w.to === toEl.value);
+      presetSel.value = matched ? matched.displayName : '__custom__';
+      updateExistingEventsHeader();
+      const calId = (document.getElementById('viewCalendarSelect') || {}).value;
+      if (calId) loadViewEvents(calId);
+    }
+    fromEl.addEventListener('change', maybeSetCustom);
+    toEl.addEventListener('change', maybeSetCustom);
+  }
+
+  function setStepperProgress(stepperId, activeStep) {
+    const root = document.getElementById(stepperId);
+    if (!root) return;
+    const current = Number(activeStep || 1);
+    root.querySelectorAll('.step').forEach(step => {
+      const stepNum = Number(step.getAttribute('data-step') || '1');
+      step.classList.toggle('active', stepNum === current);
+      step.classList.toggle('done', stepNum < current);
+    });
+  }
+
+  function addDefaultOption(selectEl, text) {
+    if (!selectEl) return;
+    if (!selectEl.options.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = text;
+      selectEl.appendChild(opt);
+    }
+  }
+
+  function populateTeacherSelect(selectEl, list) {
+    if (!selectEl) return;
+    selectEl.innerHTML = '';
+    addDefaultOption(selectEl, '-- Select teacher --');
+    (list || []).forEach(t => {
+      const o = document.createElement('option');
+      o.value = t.email;
+      o.textContent = t.name || t.email;
+      selectEl.appendChild(o);
+    });
+  }
+
+  function populateTextSelect(selectEl, list, defaultText) {
+    if (!selectEl) return;
+    selectEl.innerHTML = '';
+    addDefaultOption(selectEl, defaultText);
+    (list || []).forEach(item => {
+      const o = document.createElement('option');
+      o.value = item;
+      o.textContent = item;
+      selectEl.appendChild(o);
+    });
+  }
+
+  function hydrateSourceSelectors() {
+    const teacherTargets = [
+      document.getElementById('otherTeacherSelect'),
+      document.getElementById('updateOtherTeacherSelect')
+    ];
+    const classTargets = [
+      document.getElementById('classSelect'),
+      document.getElementById('updateClassSelect')
+    ];
+    const roomTargets = [
+      document.getElementById('roomSelect'),
+      document.getElementById('updateRoomSelect')
+    ];
+
+    showSpinner(true);
+    Promise.all([
+      rpc('getTeachers').catch(() => []),
+      rpc('getClasses').catch(() => []),
+      rpc('getRooms').catch(() => [])
+    ]).then(([teachers, classes, rooms]) => {
+      teacherTargets.forEach(sel => populateTeacherSelect(sel, teachers));
+      classTargets.forEach(sel => populateTextSelect(sel, classes, '-- Select class --'));
+      roomTargets.forEach(sel => populateTextSelect(sel, rooms, '-- Select room --'));
+    }).finally(() => showSpinner(false));
+  }
+
+  function switchTab(tabId) {
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabId));
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.toggle('active', el.id === tabId));
+  console.debug('switchTab()', { tabId });
+    // If switching to Jobs, refresh once and start poller; otherwise stop list poller to save cycles
+    try {
+      if (tabId === 'jobsTab') {
+        startJobsPoller();
+      } else if (tabId === 'updateTab') {
+        stopJobsPoller();
+      } else {
+        stopJobsPoller();
+      }
+      if (tabId === 'addTab') {
+        const inPreview = document.getElementById('previewSection').style.display !== 'none';
+        setStepperProgress('addStepper', inPreview ? 2 : 1);
+      }
+      if (tabId === 'updateTab') {
+        const inCompare = document.getElementById('updateCompareSection').style.display !== 'none';
+        setStepperProgress('updateStepper', inCompare ? 2 : 1);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  // Build a new form row
+  function addRow(prefill) {
+    const template = document.getElementById('rowTemplate');
+    const row = template.cloneNode(true);
+    row.removeAttribute('id');
+    row.removeAttribute('data-template');
+    row.style.display = '';
+
+    // Populate period options
+    const periodSelect = row.querySelector('.period-select');
+    periodSelect.innerHTML = '<option value="">Select Period</option>' + state.periods.map(p => '<option value="' + p.id + '">' + p.text + '</option>').join('');
+
+    if (prefill) {
+      if (prefill.day) row.querySelector('.day-select').value = prefill.day;
+      if (prefill.periodId) periodSelect.value = prefill.periodId;
+      if (prefill.title) row.querySelector('.title-input').value = prefill.title;
+      if (prefill.location) row.querySelector('.location-input').value = prefill.location;
+    }
+  console.debug('addRow()', { prefill });
+
+    // Enable delete button for this form row
+    const delBtn = row.querySelector('.delete-row-btn');
+    if (delBtn) {
+      delBtn.addEventListener('click', () => row.remove());
+    }
+
+    document.getElementById('formRows').appendChild(row);
+  }
+
+  // Read structured data from a form row DOM element
+  function getRowData(row) {
+    return {
+      day: (row.querySelector('.day-select')||{}).value || '',
+      periodId: (row.querySelector('.period-select')||{}).value || '',
+      title: (row.querySelector('.title-input')||{}).value || '',
+      location: (row.querySelector('.location-input')||{}).value || ''
+    };
+  }
+
+  // Set values into an existing form row element
+  function setRowData(row, data) {
+    try {
+      if (data.day) row.querySelector('.day-select').value = data.day; else row.querySelector('.day-select').value = '';
+      if (data.periodId) row.querySelector('.period-select').value = data.periodId; else row.querySelector('.period-select').value = '';
+      row.querySelector('.title-input').value = data.title || '';
+      row.querySelector('.location-input').value = data.location || '';
+    } catch (e) { /* ignore */ }
+  }
+
+  // Sort form rows by field (day, periodId, title, location). Toggles asc/desc.
+  state.sortField = null; state.sortDir = 1; // 1=asc, -1=desc
+  // Helper: attempt to parse numeric part for natural sorting (e.g. "Day 10" -> 10)
+  function parseSortKey(field, raw) {
+    const s = (raw || '').toString().trim();
+    // For day and periodId, try to extract the first number
+    if (field === 'day' || field === 'periodId') {
+      const m = s.match(/(\d+)/);
+      if (m) return { num: parseInt(m[1], 10), str: s.toLowerCase() };
+    }
+    return { str: s.toLowerCase() };
+  }
+  function sortFormRows(field) {
+    const container = document.getElementById('formRows');
+    const rows = Array.from(container.querySelectorAll('.form-row')).filter(r => !r.dataset.template && !r.classList.contains('header'));
+    if (!rows.length) return;
+    if (state.sortField === field) state.sortDir = -state.sortDir; else { state.sortField = field; state.sortDir = 1; }
+    const mapped = rows.map(r => ({ dom: r, data: getRowData(r) }));
+    mapped.sort((a,b) => {
+      const ka = parseSortKey(field, a.data[field]);
+      const kb = parseSortKey(field, b.data[field]);
+      // If both have numeric parts, compare numerically
+      if (ka.num != null && kb.num != null) {
+        if (ka.num < kb.num) return -1 * state.sortDir;
+        if (ka.num > kb.num) return 1 * state.sortDir;
+        // fallback to string compare if numbers equal
+        if (ka.str < kb.str) return -1 * state.sortDir;
+        if (ka.str > kb.str) return 1 * state.sortDir;
+        return 0;
+      }
+      // If only one has number, prefer the numeric one first
+      if (ka.num != null && kb.num == null) return -1 * state.sortDir;
+      if (ka.num == null && kb.num != null) return 1 * state.sortDir;
+      // Default string compare
+      const va = (ka.str || '').toString();
+      const vb = (kb.str || '').toString();
+      if (va < vb) return -1 * state.sortDir;
+      if (va > vb) return 1 * state.sortDir;
+      return 0;
+    });
+    // Re-append in new order
+    mapped.forEach(m => container.appendChild(m.dom));
+    // Update header indicators
+    updateHeaderSortIndicators();
+  }
+
+  function updateHeaderSortIndicators() {
+    document.querySelectorAll('.form-row.header label').forEach(lbl => {
+      // remove existing indicator
+      let sp = lbl.querySelector('.sort-ind');
+      if (!sp) { sp = document.createElement('span'); sp.className = 'sort-ind'; lbl.appendChild(sp); }
+      sp.textContent = '';
+      const key = lbl.getAttribute('data-sort-key');
+      if (key && state.sortField === key) sp.textContent = state.sortDir === 1 ? '▲' : '▼';
+    });
+  }
+
+  function collectFormData() {
+    const rows = Array.from(document.querySelectorAll('#formRows .form-row'))
+      .filter(r => !r.dataset.template && !r.classList.contains('header'));
+    const out = [];
+    for (const r of rows) {
+      const dayEl = r.querySelector('.day-select');
+      const periodEl = r.querySelector('.period-select');
+      const titleEl = r.querySelector('.title-input');
+      const locEl = r.querySelector('.location-input');
+      if (!dayEl || !periodEl || !titleEl || !locEl) continue;
+      const item = {
+        day: dayEl.value,
+        periodId: periodEl.value,
+        title: titleEl.value,
+        location: locEl.value,
+      };
+      out.push(item);
+    }
+    
+    // Debug logging to help identify missing data
+    const filtered = out.filter(x => x.day && x.periodId && x.title);
+    const rejected = out.filter(x => !x.day || !x.periodId || !x.title);
+    
+    if (rejected.length > 0) {
+      console.warn('collectFormData: Rejected rows with missing data:', rejected);
+      console.log('Available periods:', state.periods.map(p => ({ id: p.id, text: p.text })));
+    }
+    
+    console.debug('collectFormData:', { totalRows: out.length, validRows: filtered.length, rejectedRows: rejected.length });
+    
+    return filtered;
+  }
+
+  function groupByTitle(events) {
+    const groups = {};
+    events.forEach(ev => {
+      if (!groups[ev.title]) groups[ev.title] = [];
+      groups[ev.title].push(ev);
+    });
+    return groups;
+  }
+
+  // ===== UPDATE TAB HELPERS =====
+
+  function addUpdateRow(prefill) {
+    const template = document.getElementById('updateRowTemplate');
+    const row = template.cloneNode(true);
+    row.removeAttribute('id');
+    row.removeAttribute('data-template');
+    row.style.display = '';
+    const periodSelect = row.querySelector('.period-select');
+    periodSelect.innerHTML = '<option value="">Select Period</option>' + state.periods.map(p => '<option value="' + p.id + '">' + p.text + '</option>').join('');
+    if (prefill) {
+      if (prefill.day) row.querySelector('.day-select').value = prefill.day;
+      if (prefill.periodId) periodSelect.value = prefill.periodId;
+      if (prefill.title) row.querySelector('.title-input').value = prefill.title;
+      if (prefill.location) row.querySelector('.location-input').value = prefill.location;
+    }
+    const delBtn = row.querySelector('.delete-row-btn');
+    if (delBtn) delBtn.addEventListener('click', () => row.remove());
+    document.getElementById('updateFormRows').appendChild(row);
+  }
+
+  function collectUpdateFormData() {
+    const rows = Array.from(document.querySelectorAll('#updateFormRows .form-row'))
+      .filter(r => !r.dataset.template && !r.classList.contains('header'));
+    return rows.map(r => ({
+      day: (r.querySelector('.day-select') || {}).value || '',
+      periodId: (r.querySelector('.period-select') || {}).value || '',
+      title: (r.querySelector('.title-input') || {}).value || '',
+      location: (r.querySelector('.location-input') || {}).value || ''
+    })).filter(x => x.day && x.periodId && x.title);
+  }
+
+  function compareEvents(existingEvents, previewEvents) {
+    const existingBySeId = {};
+    existingEvents.forEach(ev => {
+      var seId = ev.schoogleEventId;
+      if (seId) {
+        if (!existingBySeId[seId]) existingBySeId[seId] = [];
+        existingBySeId[seId].push(ev);
+      }
+    });
+    const matched = [], mismatched = [], newPreview = [];
+    const usedExistingIds = new Set();
+    previewEvents.forEach(pev => {
+      var seId = pev.schoogleEventId;
+      var existingList = seId ? existingBySeId[seId] : null;
+      if (existingList && existingList.length > 0) {
+        var existing = existingList.shift();
+        usedExistingIds.add(existing.id);
+        if (eventsDetailMatch(existing, pev)) {
+          matched.push({ existing: existing, preview: pev });
+        } else {
+          mismatched.push({ existing: existing, preview: pev });
+        }
+      } else {
+        newPreview.push(pev);
+      }
+    });
+    var orphanedExisting = existingEvents.filter(ev => !usedExistingIds.has(ev.id));
+    return { matched: matched, mismatched: mismatched, orphanedExisting: orphanedExisting, newPreview: newPreview };
+  }
+
+  function eventsDetailMatch(existing, preview) {
+    if ((existing.title || '').trim() !== (preview.title || '').trim()) return false;
+    if ((existing.location || '').trim() !== (preview.location || '').trim()) return false;
+    try {
+      var eStart = new Date(existing.start);
+      var pStart = new Date(preview.startDate + 'T' + preview.startTime + ':00');
+      if (Math.abs(eStart.getTime() - pStart.getTime()) > 60000) return false;
+      var eEnd = new Date(existing.end);
+      var pEnd = new Date(preview.startDate + 'T' + preview.endTime + ':00');
+      if (Math.abs(eEnd.getTime() - pEnd.getTime()) > 60000) return false;
+    } catch (e) { return false; }
+    return true;
+  }
+
+  function createEventCard(ev, type) {
+    var card = document.createElement('div');
+    card.className = 'update-event-card ' + (type === 'existing' ? 'update-card-existing' : 'update-card-preview');
+    var titleEl = document.createElement('div');
+    titleEl.style.fontWeight = '600';
+    titleEl.style.marginBottom = '4px';
+    titleEl.textContent = ev.title || '(Untitled)';
+    var timeEl = document.createElement('div');
+    timeEl.style.fontSize = '13px';
+    timeEl.style.color = 'var(--muted)';
+    if (type === 'existing') {
+      timeEl.textContent = fmt(ev.start) + ' \u2192 ' + fmt(ev.end);
+    } else {
+      timeEl.textContent = ev.startDate + ' ' + ev.startTime + ' \u2192 ' + ev.endTime;
+    }
+    card.appendChild(titleEl);
+    card.appendChild(timeEl);
+    if (ev.location) {
+      var locEl = document.createElement('div');
+      locEl.style.fontSize = '12px';
+      locEl.style.color = 'var(--muted)';
+      locEl.textContent = '\uD83D\uDCCD ' + ev.location;
+      card.appendChild(locEl);
+    }
+    if (ev.schoogleEventId) {
+      var seIdEl = document.createElement('div');
+      seIdEl.style.fontSize = '11px';
+      seIdEl.style.color = 'var(--muted)';
+      seIdEl.style.fontFamily = 'monospace';
+      seIdEl.style.marginTop = '4px';
+      seIdEl.textContent = 'ID: ' + ev.schoogleEventId;
+      card.appendChild(seIdEl);
+    }
+    return card;
+  }
+
+  function renderUpdateComparison(comparison) {
+    var matchedSection = document.getElementById('updateMatchedSection');
+    var unmatchedSection = document.getElementById('updateUnmatchedSection');
+    var meta = document.getElementById('updateCompareMeta');
+    matchedSection.innerHTML = '';
+    unmatchedSection.innerHTML = '';
+    var totalChanges = comparison.mismatched.length + comparison.orphanedExisting.length + comparison.newPreview.length;
+    meta.textContent = 'Matched: ' + comparison.matched.length + ' | Changes needed: ' + totalChanges +
+      ' (Mismatched: ' + comparison.mismatched.length + ', To delete: ' + comparison.orphanedExisting.length + ', To create: ' + comparison.newPreview.length + ')';
+
+    // Render matched events (collapsed)
+    if (comparison.matched.length > 0) {
+      var details = document.createElement('details');
+      var summary = document.createElement('summary');
+      summary.textContent = '\u2713 ' + comparison.matched.length + ' events match \u2014 no changes needed';
+      details.appendChild(summary);
+      var ul = document.createElement('ul');
+      ul.className = 'event-list';
+      ul.style.listStyle = 'none';
+      ul.style.padding = '10px 12px';
+      comparison.matched.forEach(function(m) {
+        var li = document.createElement('li');
+        li.style.padding = '4px 0';
+        li.style.color = 'var(--muted)';
+        li.style.fontSize = '13px';
+        li.textContent = m.preview.title + ' \u2014 ' + m.preview.startDate + ' ' + m.preview.startTime + '\u2013' + m.preview.endTime + (m.preview.location ? ' @ ' + m.preview.location : '');
+        ul.appendChild(li);
+      });
+      details.appendChild(ul);
+      matchedSection.appendChild(details);
+    }
+
+    // Build unified chronological list of changes
+    var changes = [];
+    comparison.mismatched.forEach(function(m, i) {
+      changes.push({ sortKey: new Date(m.preview.startDate + 'T' + m.preview.startTime + ':00').getTime(), type: 'mismatched', index: i, existing: m.existing, preview: m.preview });
+    });
+    comparison.orphanedExisting.forEach(function(ev, i) {
+      changes.push({ sortKey: new Date(ev.start).getTime(), type: 'orphaned', index: i, existing: ev, preview: null });
+    });
+    comparison.newPreview.forEach(function(ev, i) {
+      changes.push({ sortKey: new Date(ev.startDate + 'T' + ev.startTime + ':00').getTime(), type: 'new', index: i, existing: null, preview: ev });
+    });
+    changes.sort(function(a, b) { return (a.sortKey || 0) - (b.sortKey || 0); });
+
+    if (changes.length === 0) {
+      unmatchedSection.innerHTML = '<div style="padding:16px; color:var(--success); text-align:center;">All events match! No updates needed.</div>';
+      document.getElementById('updateDeleteCreateAllBtn').style.display = 'none';
+      document.getElementById('updateSelectAll').parentElement.style.display = 'none';
+      return;
+    }
+
+    document.getElementById('updateDeleteCreateAllBtn').style.display = '';
+    document.getElementById('updateSelectAll').parentElement.style.display = '';
+
+    // Column headers
+    var headerRow = document.createElement('div');
+    headerRow.className = 'update-col-header';
+    headerRow.innerHTML = '<span>Existing Events</span><span>Preview Events</span><span>Actions</span>';
+    unmatchedSection.appendChild(headerRow);
+
+    // Render changes
+    changes.forEach(function(change) {
+      var row = document.createElement('div');
+      row.className = 'update-comparison-row';
+      var leftCol = document.createElement('div');
+      leftCol.className = 'update-col update-col-existing';
+      var rightCol = document.createElement('div');
+      rightCol.className = 'update-col update-col-preview';
+      var actionsCol = document.createElement('div');
+      actionsCol.className = 'update-col update-col-actions';
+
+      if (change.type === 'mismatched') {
+        leftCol.appendChild(createEventCard(change.existing, 'existing'));
+        rightCol.appendChild(createEventCard(change.preview, 'preview'));
+        var cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.className = 'update-item-check'; cb.checked = true;
+        cb.dataset.type = 'mismatched'; cb.dataset.index = change.index;
+        var btn = document.createElement('button');
+        btn.className = 'btn danger mini'; btn.textContent = 'Delete & Update'; btn.style.marginTop = '4px';
+        btn.addEventListener('click', function() {
+          if (!confirm('Delete existing event and create new version?')) return;
+          var calId = state.updateCalendarId;
+          var pev = change.preview;
+          var copy = Object.assign({}, pev);
+          try { copy.startDateTime = new Date(copy.startDate + 'T' + copy.startTime + ':00').toISOString(); } catch(e) {}
+          try { copy.endDateTime = new Date(copy.startDate + 'T' + copy.endTime + ':00').toISOString(); } catch(e) {}
+          showSpinner(true);
+          rpc('deleteEventsByIds', calId, [change.existing.id])
+            .then(function() { return rpc('ensureUserWorkerTrigger'); })
+            .then(function() { return rpc('enqueueJob', [copy], calId); })
+            .then(function(jobId) {
+              row.style.opacity = '0.3'; btn.disabled = true; cb.disabled = true;
+              alert('Deleted & queued new event (Job: ' + jobId + ').');
+              try { startJobsPoller(); } catch(e) {}
+              try { rpc('processUserJobs').catch(function(){}); } catch(e) {}
+            })
+            .catch(function(err) { alert('Failed: ' + (err && err.message ? err.message : err)); })
+            .finally(function() { showSpinner(false); });
+        });
+        actionsCol.appendChild(cb);
+        actionsCol.appendChild(document.createElement('br'));
+        actionsCol.appendChild(btn);
+      } else if (change.type === 'orphaned') {
+        leftCol.appendChild(createEventCard(change.existing, 'existing'));
+        rightCol.innerHTML = '<div class="update-empty-slot">No matching preview event</div>';
+        var cb2 = document.createElement('input');
+        cb2.type = 'checkbox'; cb2.className = 'update-item-check'; cb2.checked = true;
+        cb2.dataset.type = 'orphaned'; cb2.dataset.index = change.index;
+        var delBtn = document.createElement('button');
+        delBtn.className = 'btn danger mini'; delBtn.textContent = 'Delete'; delBtn.style.marginTop = '4px';
+        delBtn.addEventListener('click', function() {
+          if (!confirm('Delete this existing event?')) return;
+          showSpinner(true);
+          rpc('deleteEventsByIds', state.updateCalendarId, [change.existing.id])
+            .then(function() { row.style.opacity = '0.3'; delBtn.disabled = true; cb2.disabled = true; alert('Event deleted.'); })
+            .catch(function(err) { alert('Failed: ' + (err && err.message ? err.message : err)); })
+            .finally(function() { showSpinner(false); });
+        });
+        actionsCol.appendChild(cb2);
+        actionsCol.appendChild(document.createElement('br'));
+        actionsCol.appendChild(delBtn);
+      } else if (change.type === 'new') {
+        leftCol.innerHTML = '<div class="update-empty-slot">No matching existing event</div>';
+        rightCol.appendChild(createEventCard(change.preview, 'preview'));
+        var cb3 = document.createElement('input');
+        cb3.type = 'checkbox'; cb3.className = 'update-item-check'; cb3.checked = true;
+        cb3.dataset.type = 'new'; cb3.dataset.index = change.index;
+        var createBtn = document.createElement('button');
+        createBtn.className = 'btn success mini'; createBtn.textContent = 'Create'; createBtn.style.marginTop = '4px';
+        createBtn.addEventListener('click', function() {
+          if (!confirm('Create this new event?')) return;
+          var calId = state.updateCalendarId;
+          var pev = change.preview;
+          var copy = Object.assign({}, pev);
+          try { copy.startDateTime = new Date(copy.startDate + 'T' + copy.startTime + ':00').toISOString(); } catch(e) {}
+          try { copy.endDateTime = new Date(copy.startDate + 'T' + copy.endTime + ':00').toISOString(); } catch(e) {}
+          showSpinner(true);
+          rpc('ensureUserWorkerTrigger')
+            .then(function() { return rpc('enqueueJob', [copy], calId); })
+            .then(function(jobId) {
+              row.style.opacity = '0.3'; createBtn.disabled = true; cb3.disabled = true;
+              alert('Event queued for creation (Job: ' + jobId + ').');
+              try { startJobsPoller(); } catch(e) {}
+              try { rpc('processUserJobs').catch(function(){}); } catch(e) {}
+            })
+            .catch(function(err) { alert('Failed: ' + (err && err.message ? err.message : err)); })
+            .finally(function() { showSpinner(false); });
+        });
+        actionsCol.appendChild(cb3);
+        actionsCol.appendChild(document.createElement('br'));
+        actionsCol.appendChild(createBtn);
+      }
+
+      row.appendChild(leftCol);
+      row.appendChild(rightCol);
+      row.appendChild(actionsCol);
+      unmatchedSection.appendChild(row);
+    });
+  }
+
+  function loadUpdateTimetableRows(dataFetcher, shouldReplace, opts) {
+    var options = opts || {};
+    var silentFailure = !!options.silentFailure;
+    showSpinner(true);
+    return dataFetcher()
+      .then(function(rows) {
+        var container = document.getElementById('updateFormRows');
+        if (shouldReplace) {
+          Array.from(container.querySelectorAll('.form-row')).filter(function(r) { return !r.dataset.template && !r.classList.contains('header'); }).forEach(function(r) { r.remove(); });
+        }
+        sortTimetableRows(rows).forEach(function(r) { addUpdateRow(r); });
+        showInlineStatus('updateStatusMessage', 'Loaded ' + ((rows || []).length) + ' timetable row(s).', 'success');
+      })
+      .catch(function(err) {
+        console.error('Loading update timetable failed', err);
+        showInlineStatus('updateStatusMessage', 'Failed to load timetable rows.', 'danger');
+        if (!silentFailure) alert('Failed to load timetable.');
+        throw err;
+      })
+      .finally(function() { showSpinner(false); });
+  }
+
+  function tryAutoLoadUpdateTabTimetable() {
+    if (state.updateDefaultLoaded || state.updateDefaultLoadPending) return;
+    var container = document.getElementById('updateFormRows');
+    if (!container) return;
+    var hasRows = Array.from(container.querySelectorAll('.form-row')).some(function(r) {
+      return !r.dataset.template && !r.classList.contains('header');
+    });
+    if (hasRows) {
+      state.updateDefaultLoaded = true;
+      return;
+    }
+
+    state.updateDefaultLoadPending = true;
+    loadUpdateTimetableRows(function() {
+      return rpc('getInitialData').then(function(data) { return data.userTimetable || []; });
+    }, true, { silentFailure: true })
+      .then(function() { state.updateDefaultLoaded = true; })
+      .catch(function() { /* silent auto-load failure */ })
+      .finally(function() { state.updateDefaultLoadPending = false; });
+  }
+
+  function showUpdateLoadConfirmModal(title, message, dataFetcher) {
+    var modal = document.getElementById('loadConfirmModal');
+    var titleEl = document.getElementById('loadConfirmTitle');
+    var messageEl = document.getElementById('loadConfirmMessage');
+    var replaceBtn = document.getElementById('loadConfirmReplace');
+    var addBtn = document.getElementById('loadConfirmAdd');
+    var cancelBtn = document.getElementById('loadConfirmCancel');
+    var container = document.getElementById('updateFormRows');
+    var hasExistingRows = !!(container && Array.from(container.querySelectorAll('.form-row')).some(function(r) { return !r.dataset.template && !r.classList.contains('header'); }));
+
+    if (!hasExistingRows) {
+      showSpinner(true);
+      dataFetcher()
+        .then(function(rows) {
+          sortTimetableRows(rows).forEach(function(r, index) {
+            console.log('Adding update row ' + index + ':', r);
+            addUpdateRow(r);
+          });
+          showInlineStatus('updateStatusMessage', 'Loaded ' + ((rows || []).length) + ' timetable row(s).', 'success');
+        })
+        .catch(function(err) { console.error('Loading update timetable failed', err); showInlineStatus('updateStatusMessage', 'Failed to load timetable rows.', 'danger'); alert('Failed to load timetable.'); })
+        .finally(function() { showSpinner(false); });
+      return;
+    }
+
+    titleEl.textContent = title;
+    messageEl.textContent = message;
+    modal.style.display = '';
+    var newReplaceBtn = replaceBtn.cloneNode(true);
+    var newAddBtn = addBtn.cloneNode(true);
+    var newCancelBtn = cancelBtn.cloneNode(true);
+    replaceBtn.parentNode.replaceChild(newReplaceBtn, replaceBtn);
+    addBtn.parentNode.replaceChild(newAddBtn, addBtn);
+    cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
+    function hideModal() { modal.style.display = 'none'; }
+    function loadData(shouldReplace) {
+      hideModal();
+      loadUpdateTimetableRows(dataFetcher, shouldReplace)
+        .catch(function() { /* handled in helper */ });
+    }
+    newReplaceBtn.addEventListener('click', function() { loadData(true); });
+    newAddBtn.addEventListener('click', function() { loadData(false); });
+    newCancelBtn.addEventListener('click', hideModal);
+    modal.addEventListener('click', function(e) { if (e.target === modal) hideModal(); });
+  }
+
+  // Reusable color picker function
+  function createColorPicker(selectedColorId, onColorChange) {
+    // Google Calendar color options
+    const colorOptions = [
+      { id: '1', name: 'Lavender', color: '#7986cb' },
+      { id: '2', name: 'Sage', color: '#33b679' },
+      { id: '3', name: 'Grape', color: '#8e24aa' },
+      { id: '4', name: 'Flamingo', color: '#e67c73' },
+      { id: '5', name: 'Banana', color: '#f6c026' },
+      { id: '6', name: 'Tangerine', color: '#f5511d' },
+      { id: '7', name: 'Peacock', color: '#039be5' },
+      { id: '8', name: 'Graphite', color: '#616161' },
+      { id: '9', name: 'Blueberry', color: '#3f51b5' },
+      { id: '10', name: 'Basil', color: '#0b8043' },
+      { id: '11', name: 'Tomato', color: '#d60000' }
+    ];
+    
+    const colorPickerContainer = document.createElement('div');
+    colorPickerContainer.className = 'color-picker-container';
+    colorPickerContainer.style.display = 'grid';
+    colorPickerContainer.style.gridTemplateColumns = 'repeat(auto-fit, minmax(120px, 1fr))';
+    colorPickerContainer.style.gap = '8px';
+    colorPickerContainer.style.padding = '8px';
+    colorPickerContainer.style.border = '1px solid var(--border)';
+    colorPickerContainer.style.borderRadius = '4px';
+    colorPickerContainer.style.background = '#0f1525';
+    
+    let currentSelectedId = selectedColorId || '1';
+    
+    colorOptions.forEach((option, index) => {
+      const colorOption = document.createElement('div');
+      colorOption.className = 'color-option';
+      colorOption.style.display = 'flex';
+      colorOption.style.alignItems = 'center';
+      colorOption.style.padding = '8px';
+      colorOption.style.cursor = 'pointer';
+      colorOption.style.borderRadius = '4px';
+      colorOption.style.border = '2px solid transparent';
+      colorOption.style.transition = 'border-color 0.2s ease';
+      
+      // Select the specified option or first by default
+      if (option.id === currentSelectedId || (!selectedColorId && index === 0)) {
+        currentSelectedId = option.id;
+        colorOption.style.borderColor = 'var(--primary)';
+        colorOption.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
+      }
+      
+      const colorPatch = document.createElement('div');
+      colorPatch.style.width = '20px';
+      colorPatch.style.height = '20px';
+      colorPatch.style.backgroundColor = option.color;
+      colorPatch.style.borderRadius = '3px';
+      colorPatch.style.marginRight = '8px';
+      colorPatch.style.border = '1px solid rgba(255,255,255,0.2)';
+      
+      const colorName = document.createElement('span');
+      colorName.textContent = option.name;
+      colorName.style.color = 'var(--text)';
+      colorName.style.fontSize = '14px';
+      
+      colorOption.appendChild(colorPatch);
+      colorOption.appendChild(colorName);
+      
+      colorOption.addEventListener('click', () => {
+        // Remove previous selection
+        colorPickerContainer.querySelectorAll('.color-option').forEach(opt => {
+          opt.style.borderColor = 'transparent';
+          opt.style.backgroundColor = 'transparent';
+        });
+        
+        // Mark this option as selected
+        colorOption.style.borderColor = 'var(--primary)';
+        colorOption.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
+        currentSelectedId = option.id;
+        
+        if (onColorChange) onColorChange(option.id, option);
+      });
+      
+      colorPickerContainer.appendChild(colorOption);
+    });
+    
+    return { 
+      element: colorPickerContainer, 
+      getSelectedColor: () => currentSelectedId,
+      colorOptions
+    };
+  }
+
+  // Helper function to format date/time for editing
+  function formatDateTimeForEdit(isoString) {
+    if (!isoString) return { date: '', time: '' };
+    const dt = new Date(isoString);
+    const date = dt.toISOString().slice(0, 10);
+    const time = ('0' + dt.getHours()).slice(-2) + ':' + ('0' + dt.getMinutes()).slice(-2);
+    return { date, time };
+  }
+
+  // Helper function to get color name from ID
+  function getColorNameFromId(colorId) {
+    const colorMap = {
+      '1': 'Lavender', '2': 'Sage', '3': 'Grape', '4': 'Flamingo', '5': 'Banana',
+      '6': 'Tangerine', '7': 'Peacock', '8': 'Graphite', '9': 'Blueberry', '10': 'Basil', '11': 'Tomato'
+    };
+    return colorMap[colorId] || 'Default';
+  }
+
+  function fmt(dt) {
+    try {
+      const d = new Date(dt);
+      return d.toLocaleString();
+    } catch(e) { return dt; }
+  }
+
+  function updateWorkerStatus(installed) {
+    const el = document.getElementById('workerStatus');
+    if (!el) return;
+    try {
+      if (typeof installed === 'undefined') installed = !!localStorage.getItem('schoogle_worker_installed');
+    } catch (e) { installed = false; }
+    if (installed) {
+      el.textContent = 'Worker installed';
+      el.style.color = 'green';
+    } else {
+      el.textContent = 'Worker not installed';
+      el.style.color = '#c33';
+    }
+  }
+
+  function renderPreview() {
+    const list = document.getElementById('previewList');
+    list.innerHTML = '';
+    const groups = groupByTitle(state.previewEvents);
+    const titles = Object.keys(groups).sort();
+    const cmp = state.unifiedComparison;
+    const normTitle = t => (t || '').toString().trim().toLowerCase();
+    const previewTitleSet = new Set((state.previewEvents || []).map(ev => normTitle(ev && ev.title)).filter(Boolean));
+  console.debug('renderPreview()', { total: state.previewEvents.length, titles, groupsSample: titles.slice(0,3).reduce((acc,t)=>{acc[t]=groups[t].length;return acc;}, {}) });
+
+    titles.forEach(title => {
+      const events = groups[title];
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      if (cmp) {
+        const key = normTitle(title);
+        const matchedCount = (cmp.matched || []).filter(m => normTitle(m.preview && m.preview.title) === key).length;
+        const createCount = (cmp.newPreview || []).filter(ev => normTitle(ev && ev.title) === key).length +
+          (cmp.mismatched || []).filter(m => normTitle(m.preview && m.preview.title) === key).length;
+        const deleteCount = (cmp.orphanedExisting || []).filter(ev => {
+          const t = normTitle(ev && ev.title);
+          return t === key && previewTitleSet.has(t);
+        }).length + (cmp.mismatched || []).filter(m => normTitle(m.existing && m.existing.title) === key).length;
+        summary.textContent = title + ' (' + events.length + ' events • match ' + matchedCount + ' • create/update ' + createCount + ' • delete ' + deleteCount + ')';
+      } else {
+        summary.textContent = title + ' (' + events.length + ' events)';
+      }
+      
+      // Container for batch action buttons
+      const batchButtonsContainer = document.createElement('div');
+      batchButtonsContainer.className = 'batch-buttons';
+      batchButtonsContainer.style.marginLeft = '8px';
+      batchButtonsContainer.style.display = 'inline-block';
+      
+      // Add a batch edit color button at the group level
+      const colorAllBtn = document.createElement('button');
+      colorAllBtn.className = 'btn primary mini';
+      colorAllBtn.style.marginRight = '4px';
+      colorAllBtn.textContent = 'Set colors';
+      colorAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        
+        // Build modal for batch color editing
+        const overlay = document.createElement('div');
+        overlay.id = 'preview-edit-color-modal';
+        overlay.className = 'schoogle-modal-overlay';
+        const box = document.createElement('div');
+        box.className = 'schoogle-modal-box';
+        const h = document.createElement('h3'); h.textContent = 'Set colors for "' + title + '"'; box.appendChild(h);
+        
+        const colorInputContainer = document.createElement('div');
+        colorInputContainer.style.marginBottom = '16px';
+        const colorLabel = document.createElement('label');
+        colorLabel.textContent = 'Select color:';
+        colorLabel.style.display = 'block';
+        colorLabel.style.marginBottom = '4px';
+        
+        const colorPicker = createColorPicker(null, null);
+        
+        colorInputContainer.appendChild(colorLabel);
+        colorInputContainer.appendChild(colorPicker.element);
+        box.appendChild(colorInputContainer);
+        
+        const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+        const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+        events.forEach(ev => {
+          const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+          const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.index = events.indexOf(ev);
+          const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + (ev.startDate || 'Date TBD') + ' ' + (ev.startTime || 'Time TBD');
+          li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+        });
+        box.appendChild(ul);
+        const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+        const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+        btnCancel.addEventListener('click', () => overlay.remove());
+        const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+        btnConfirm.addEventListener('click', () => {
+          const selectedColor = colorPicker.getSelectedColor();
+          if (!selectedColor) { alert('Please select a color.'); return; }
+          const selectedIndices = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>parseInt(i.dataset.index));
+          if (!selectedIndices.length) { alert('No events selected.'); return; }
+          
+          // Update the selected events
+          selectedIndices.forEach(index => {
+            events[index].colorId = selectedColor;
+          });
+          
+          overlay.remove();
+          renderPreview(); // Re-render to show color changes
+          alert('Updated ' + selectedIndices.length + ' events.');
+        });
+        btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+        overlay.appendChild(box); document.body.appendChild(overlay);
+      });
+      batchButtonsContainer.appendChild(colorAllBtn);
+      
+      // Add a batch invite button at the group level
+      const inviteAllBtn = document.createElement('button');
+      inviteAllBtn.className = 'btn secondary mini';
+      inviteAllBtn.style.marginRight = '4px';
+      inviteAllBtn.textContent = 'Set invites';
+      inviteAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        
+        // Build modal for batch invitation editing
+        const overlay = document.createElement('div');
+        overlay.id = 'preview-edit-invites-modal';
+        overlay.className = 'schoogle-modal-overlay';
+        const box = document.createElement('div');
+        box.className = 'schoogle-modal-box';
+        const h = document.createElement('h3'); h.textContent = 'Set invitations for "' + title + '"'; box.appendChild(h);
+        
+        const inviteInputContainer = document.createElement('div');
+        inviteInputContainer.style.marginBottom = '16px';
+        const inviteLabel = document.createElement('label');
+        inviteLabel.textContent = 'Email addresses (comma-separated):';
+        inviteLabel.style.display = 'block';
+        inviteLabel.style.marginBottom = '4px';
+        
+        const inviteInput = document.createElement('textarea');
+        inviteInput.style.width = '100%';
+        inviteInput.style.height = '80px';
+        inviteInput.style.padding = '8px';
+        inviteInput.style.border = '1px solid var(--border)';
+        inviteInput.style.borderRadius = '4px';
+        inviteInput.style.background = '#ffffff';
+        inviteInput.style.color = '#111111';
+        inviteInput.style.fontFamily = 'inherit';
+        inviteInput.style.fontSize = '14px';
+        inviteInput.style.resize = 'vertical';
+        inviteInput.placeholder = 'user1@example.com, user2@example.com, user3@example.com';
+        
+        // Check if any events already have invites set and pre-populate
+        const existingInvites = events.find(ev => ev.inviteEmails);
+        if (existingInvites && existingInvites.inviteEmails) {
+          inviteInput.value = Array.isArray(existingInvites.inviteEmails) ? existingInvites.inviteEmails.join(', ') : existingInvites.inviteEmails;
+        }
+        
+        const helpText = document.createElement('div');
+        helpText.style.fontSize = '12px';
+        helpText.style.color = 'var(--muted)';
+        helpText.style.marginTop = '4px';
+        helpText.textContent = 'Enter email addresses separated by commas. These users will be invited to the selected events.';
+        
+        inviteInputContainer.appendChild(inviteLabel);
+        inviteInputContainer.appendChild(inviteInput);
+        inviteInputContainer.appendChild(helpText);
+        box.appendChild(inviteInputContainer);
+        
+        const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+        const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+        events.forEach(ev => {
+          const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+          const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.index = events.indexOf(ev);
+          const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + (ev.startDate || 'Date TBD') + ' ' + (ev.startTime || 'Time TBD');
+          li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+        });
+        box.appendChild(ul);
+        const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+        const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+        btnCancel.addEventListener('click', () => overlay.remove());
+        const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+        btnConfirm.addEventListener('click', () => {
+          const emailString = inviteInput.value.trim();
+          const selectedIndices = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>parseInt(i.dataset.index));
+          if (!selectedIndices.length) { alert('No events selected.'); return; }
+          
+          // Parse and validate email addresses
+          let emails = [];
+          if (emailString) {
+            emails = emailString.split(',').map(email => email.trim()).filter(email => {
+              const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+              return emailRegex.test(email);
+            });
+            
+            if (emailString && emails.length === 0) {
+              alert('Please enter valid email addresses.');
+              return;
+            }
+          }
+          
+          // Update the selected events
+          selectedIndices.forEach(index => {
+            events[index].inviteEmails = emails.length > 0 ? emails : null;
+          });
+          
+          overlay.remove();
+          renderPreview(); // Re-render to show invite changes
+          alert('Updated invitations for ' + selectedIndices.length + ' events.' + (emails.length > 0 ? ' (' + emails.length + ' invitees)' : ' (cleared invitations)'));
+        });
+        btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+        overlay.appendChild(box); document.body.appendChild(overlay);
+      });
+      batchButtonsContainer.appendChild(inviteAllBtn);
+      
+      summary.appendChild(batchButtonsContainer);
+      details.appendChild(summary);
+
+      const ul = document.createElement('ul');
+      ul.className = 'event-list';
+
+      events.forEach((ev, idx) => {
+        const li = document.createElement('li');
+        li.className = 'event-item';
+        li.dataset.schoogleEventId = ev.schoogleEventId;
+
+        const timeWrapper = document.createElement('div');
+        timeWrapper.className = 'event-time-edit';
+
+        // Single date input (applies to both start and end dates)
+        const dateInput = document.createElement('input');
+        dateInput.type = 'date';
+        dateInput.value = ev.startDate || (ev.startDateTime ? new Date(ev.startDateTime).toISOString().slice(0,10) : '');
+        dateInput.addEventListener('change', () => {
+          ev.startDate = dateInput.value;
+          ev.endDate = dateInput.value;
+          // recompute datetimes if times are present
+          if (ev.startDate && ev.startTime) ev.startDateTime = new Date(ev.startDate + 'T' + ev.startTime + ':00').toISOString();
+          if (ev.endDate && ev.endTime) ev.endDateTime = new Date(ev.endDate + 'T' + ev.endTime + ':00').toISOString();
+          updatePreviewMeta();
+        });
+
+        // Start time input
+        const startTimeInput = document.createElement('input');
+        startTimeInput.type = 'time';
+        startTimeInput.step = 60;
+        startTimeInput.value = ev.startTime || (ev.startDateTime ? new Date(ev.startDateTime).toTimeString().slice(0,5) : '');
+        startTimeInput.addEventListener('change', () => {
+          ev.startTime = startTimeInput.value;
+          if (ev.startDate && ev.startTime) {
+            ev.startDateTime = new Date(ev.startDate + 'T' + ev.startTime + ':00').toISOString();
+          }
+          updatePreviewMeta();
+        });
+
+        // Separator
+        const sep = document.createElement('span'); sep.textContent = ' → '; sep.className = 'time-sep';
+
+  // End date is driven by the single dateInput above, so we no longer render a separate end date input
+
+        const endTimeInput = document.createElement('input');
+        endTimeInput.type = 'time';
+        endTimeInput.step = 60;
+        endTimeInput.value = ev.endTime || (ev.endDateTime ? new Date(ev.endDateTime).toTimeString().slice(0,5) : '');
+        endTimeInput.addEventListener('change', () => {
+          ev.endTime = endTimeInput.value;
+          if (ev.endDate && ev.endTime) {
+            ev.endDateTime = new Date(ev.endDate + 'T' + ev.endTime + ':00').toISOString();
+          }
+          updatePreviewMeta();
+        });
+
+  timeWrapper.appendChild(dateInput);
+        timeWrapper.appendChild(startTimeInput);
+        timeWrapper.appendChild(sep);
+        timeWrapper.appendChild(endTimeInput);
+
+        const titleInput = document.createElement('input');
+        titleInput.type = 'text';
+        titleInput.value = ev.title;
+        titleInput.className = 'event-title-edit';
+        titleInput.addEventListener('input', () => { ev.title = titleInput.value; });
+
+        // Color picker for individual events
+        const colorContainer = document.createElement('div');
+        colorContainer.style.display = 'flex';
+        colorContainer.style.alignItems = 'center';
+        colorContainer.style.marginTop = '8px';
+        colorContainer.style.gap = '8px';
+        
+        const colorLabel = document.createElement('span');
+        colorLabel.textContent = 'Color:';
+        colorLabel.style.fontSize = '12px';
+        colorLabel.style.color = 'var(--muted)';
+        colorLabel.style.minWidth = '35px';
+        
+        const colorBtn = document.createElement('button');
+        colorBtn.type = 'button';
+        colorBtn.className = 'btn mini';
+        colorBtn.style.padding = '4px 8px';
+        colorBtn.style.fontSize = '11px';
+        const currentColorName = getColorNameFromId(ev.colorId || '1');
+        colorBtn.textContent = currentColorName;
+        colorBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          
+          // Create mini color picker modal
+          const overlay = document.createElement('div');
+          overlay.className = 'schoogle-modal-overlay';
+          const box = document.createElement('div');
+          box.className = 'schoogle-modal-box';
+          box.style.maxWidth = '400px';
+          const h = document.createElement('h4'); h.textContent = 'Select color for: ' + ev.title; h.style.margin = '0 0 12px 0'; box.appendChild(h);
+          
+          const colorPicker = createColorPicker(ev.colorId || '1', (colorId, colorOption) => {
+            ev.colorId = colorId;
+            colorBtn.textContent = colorOption.name;
+            overlay.remove();
+          });
+          
+          box.appendChild(colorPicker.element);
+          
+          const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '12px';
+          const btnCancel = document.createElement('button'); btnCancel.className = 'btn mini'; btnCancel.textContent = 'Cancel';
+          btnCancel.addEventListener('click', () => overlay.remove());
+          btnBar.appendChild(btnCancel);
+          box.appendChild(btnBar);
+          
+          overlay.appendChild(box); document.body.appendChild(overlay);
+        });
+        
+        colorContainer.appendChild(colorLabel);
+        colorContainer.appendChild(colorBtn);
+
+        // Email invitations for individual events
+        const inviteContainer = document.createElement('div');
+        inviteContainer.style.marginTop = '8px';
+        
+        const inviteLabel = document.createElement('span');
+        inviteLabel.textContent = 'Invites:';
+        inviteLabel.style.fontSize = '12px';
+        inviteLabel.style.color = 'var(--muted)';
+        inviteLabel.style.display = 'block';
+        inviteLabel.style.marginBottom = '4px';
+        
+        const inviteInput = document.createElement('input');
+        inviteInput.type = 'text';
+        inviteInput.style.width = '100%';
+        inviteInput.style.padding = '4px 8px';
+        inviteInput.style.border = '1px solid var(--border)';
+        inviteInput.style.borderRadius = '4px';
+        inviteInput.style.background = '#ffffff';
+        inviteInput.style.color = '#111111';
+        inviteInput.style.fontSize = '12px';
+        inviteInput.placeholder = 'user1@example.com, user2@example.com';
+        inviteInput.value = ev.inviteEmails ? (Array.isArray(ev.inviteEmails) ? ev.inviteEmails.join(', ') : ev.inviteEmails) : '';
+        inviteInput.addEventListener('input', () => {
+          const emailString = inviteInput.value.trim();
+          if (emailString) {
+            const emails = emailString.split(',').map(email => email.trim()).filter(email => email);
+            ev.inviteEmails = emails.length > 0 ? emails : null;
+          } else {
+            ev.inviteEmails = null;
+          }
+        });
+        
+        inviteContainer.appendChild(inviteLabel);
+        inviteContainer.appendChild(inviteInput);
+
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.textContent = 'Delete';
+        delBtn.className = 'btn danger mini';
+        // Prevent clicks from bubbling to the <details> which toggles it
+        delBtn.addEventListener('pointerdown', e => { if (e && e.stopPropagation) e.stopPropagation(); });
+        delBtn.addEventListener('click', (evclick) => {
+          try {
+            if (evclick && evclick.stopPropagation) evclick.stopPropagation();
+            if (evclick && evclick.preventDefault) evclick.preventDefault();
+            // disable the button immediately to prevent double-clicks
+            delBtn.disabled = true;
+            delBtn.classList.add('disabled');
+            // remove from state and re-render
+            state.previewEvents = state.previewEvents.filter(x => x !== ev);
+            renderPreview();
+            updatePreviewMeta();
+          } catch (e) {
+            console.error('preview delete failed', e);
+            try { delBtn.disabled = false; delBtn.classList.remove('disabled'); } catch (e2) {}
+          }
+        });
+
+  li.appendChild(timeWrapper);
+        li.appendChild(titleInput);
+        li.appendChild(colorContainer);
+        li.appendChild(inviteContainer);
+        li.appendChild(delBtn);
+        ul.appendChild(li);
+      });
+
+      details.appendChild(ul);
+      list.appendChild(details);
+    });
+  }
+
+  function updatePreviewMeta() {
+    const meta = document.getElementById('previewMeta');
+    const n = state.previewEvents.length;
+    const fromDate = document.getElementById('fromDate').value;
+    const toDate = document.getElementById('toDate').value;
+    
+    let dateWindowText = '';
+    if (fromDate && toDate) {
+      dateWindowText = ` Date window: ${fromDate} to ${toDate}.`;
+    } else if (fromDate || toDate) {
+      dateWindowText = ` Date window: ${fromDate || 'start'} to ${toDate || 'end'}.`;
+    }
+
+    const cmp = state.unifiedComparison;
+    if (cmp) {
+      const toCreate = cmp.newPreview.length + cmp.mismatched.length;
+      const titleSet = new Set((state.previewEvents || []).map(ev => ((ev && ev.title) || '').toString().trim().toLowerCase()).filter(Boolean));
+      const scopedOrphanDelete = (cmp.orphanedExisting || []).filter(ev => titleSet.has(((ev && ev.title) || '').toString().trim().toLowerCase())).length;
+      const toDelete = scopedOrphanDelete + cmp.mismatched.length;
+      meta.textContent = `Matched: ${cmp.matched.length} | Create/Update: ${toCreate} | Delete: ${toDelete}.${dateWindowText}`;
+      return;
+    }
+
+    meta.textContent = `Total events to create: ${n}. Estimated time ~ ${n}s.${dateWindowText}`;
+  }
+
+  function populateCalendars(selectEl, calendars) {
+    selectEl.innerHTML = '';
+    const optNew = document.createElement('option');
+    optNew.value = '__new__';
+    optNew.textContent = '➕ Create new calendar…';
+
+    calendars.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id; opt.textContent = c.name;
+      selectEl.appendChild(opt);
+    });
+    selectEl.appendChild(optNew);
+  }
+
+  function loadCalendars() {
+    showSpinner(true);
+    const viewSelect = document.getElementById('viewCalendarSelect');
+    const selectedValue = viewSelect ? viewSelect.value : '';
+    rpc('getCalendarList')
+      .then(cals => {
+        state.calendars = cals || [];
+        populateCalendars(viewSelect, state.calendars);
+        if (viewSelect && selectedValue) {
+          const hasSelected = Array.from(viewSelect.options).some(opt => opt.value === selectedValue);
+          if (hasSelected) viewSelect.value = selectedValue;
+        }
+        // Populate Update tab calendar select (without "Create new" option)
+        var _updateCalSel = document.getElementById('updateCalendarSelect');
+        if (_updateCalSel) {
+          populateCalendars(_updateCalSel, state.calendars);
+          var _newOpt = _updateCalSel.querySelector('option[value="__new__"]');
+          if (_newOpt) _newOpt.remove();
+        }
+        updateExistingEventsHeader();
+        console.debug('Calendars loaded', { count: state.calendars.length, sample: state.calendars.slice(0,5) });
+      })
+      .catch(err => {
+        console.error('getCalendarList failed', err);
+      })
+      .finally(() => showSpinner(false));
+  }
+
+  function init() {
+    // Tabs
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    // Add row
+    document.getElementById('addRowBtn').addEventListener('click', () => addRow());
+
+    // Make header labels clickable for sorting form rows
+    document.querySelectorAll('.form-row.header label').forEach(lbl => {
+      lbl.addEventListener('click', () => {
+        const key = lbl.getAttribute('data-sort-key');
+        if (!key) return;
+        sortFormRows(key);
+      });
+    });
+
+  // Worker install UI: add a small button/status next to the Create button
+    (function attachWorkerUi(){
+      try {
+        const createBtn = document.getElementById('createBtn');
+        if (!createBtn) return;
+        const container = document.createElement('div');
+        container.style.display = 'inline-block';
+        container.style.marginLeft = '8px';
+
+        const installBtn = document.createElement('button');
+        installBtn.id = 'installWorkerBtn';
+        installBtn.type = 'button';
+        installBtn.className = 'btn mini';
+        installBtn.textContent = 'Install worker';
+        installBtn.addEventListener('click', () => {
+          installBtn.disabled = true;
+          showSpinner(true);
+          rpc('ensureUserWorkerTrigger')
+            .then(() => {
+              localStorage.setItem('schoogle_worker_installed', '1');
+              updateWorkerStatus(true);
+              alert('Worker installed. Jobs will be processed in your account.');
+            })
+            .catch(err => {
+              console.error('ensureUserWorkerTrigger failed', err);
+              alert('Failed to install worker: ' + (err && err.message ? err.message : err));
+            })
+            .finally(() => { installBtn.disabled = false; showSpinner(false); });
+        });
+
+        const status = document.createElement('span');
+        status.id = 'workerStatus';
+        status.style.marginLeft = '8px';
+        status.style.fontSize = '0.9em';
+        status.style.color = '#444';
+
+        container.appendChild(installBtn);
+        container.appendChild(status);
+        createBtn.parentNode.insertBefore(container, createBtn.nextSibling);
+  // initialize
+  updateWorkerStatus();
+      } catch (e) { console.warn('attachWorkerUi', e); }
+    })();
+
+    // Preview
+  document.getElementById('previewBtn').addEventListener('click', () => {
+      const data = collectFormData();
+      if (!data.length) { showInlineStatus('addStatusMessage', 'Please enter or load at least one timetable row before previewing.', 'warning'); return; }
+  const viewCalId = document.getElementById('viewCalendarSelect').value;
+  if (!viewCalId) { showInlineStatus('addStatusMessage', 'Please select a calendar in Step 2 first.', 'warning'); return; }
+  const from = document.getElementById('fromDate').value;
+  const to = document.getElementById('toDate').value;
+      console.log('Preview click - date values:', { from, to, fromType: typeof from, toType: typeof to });
+      
+      // Snapshot all rows (including partial) for debugging
+      const rowsSnapshot = Array.from(document.querySelectorAll('#formRows .form-row'))
+        .filter(r => !r.dataset.template && !r.classList.contains('header'))
+        .map(r => ({
+          day: (r.querySelector('.day-select')||{}).value || '',
+          periodId: (r.querySelector('.period-select')||{}).value || '',
+          title: (r.querySelector('.title-input')||{}).value || '',
+          location: (r.querySelector('.location-input')||{}).value || ''
+        }));
+      console.debug('Preview click', { from, to, inputRowsCount: data.length, inputRowsSample: data.slice(0,5), allRowsSnapshotSample: rowsSnapshot.slice(0,5) });
+      showSpinner(true);
+      Promise.all([
+        rpc('generatePreviewEvents', { items: data, from, to }),
+        rpc('getEventsFromCalendarInRange', viewCalId, from, to)
+      ])
+        .then(results => {
+          const evts = results[0];
+          const existingEvents = results[1] || [];
+          // Always re-enable Create Events button after preview
+          try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+          // Debug: log raw full payload (RPC_DEBUG will show full bodies; otherwise this still helps)
+          console.log('Generated Events (raw):', evts);
+          
+          // Log debug info if present
+          if (evts && evts.debug) {
+            console.log('Server Debug Info:', evts.debug);
+          }
+
+          // Defensive normalization: server may return an array or an object like { results: [...] }.
+          let normalized = [];
+          try {
+            if (Array.isArray(evts)) {
+              normalized = evts;
+            } else if (evts && Array.isArray(evts.results)) {
+              normalized = evts.results;
+            } else if (evts && Array.isArray(evts.events)) {
+              normalized = evts.events;
+            } else if (evts && evts.data && Array.isArray(evts.data.results)) {
+              normalized = evts.data.results;
+            } else if (evts && typeof evts === 'object') {
+              // Fallback: pick the first array-valued property if present
+              for (const k of Object.keys(evts)) {
+                if (Array.isArray(evts[k])) { normalized = evts[k]; break; }
+              }
+            }
+          } catch (e) { console.warn('Normalization error', e); }
+
+          // Ensure dates are printable strings and expose separate date/time fields for editing
+          normalized = (normalized || []).map(item => {
+            if (!item || typeof item !== 'object') return item;
+            const copy = Object.assign({}, item);
+            // Normalize start/end to ISO strings if Date objects
+            try { if (copy.startDateTime && copy.startDateTime.toISOString) copy.startDateTime = copy.startDateTime.toISOString(); } catch(e) {}
+            try { if (copy.endDateTime && copy.endDateTime.toISOString) copy.endDateTime = copy.endDateTime.toISOString(); } catch(e) {}
+
+            // Derive separate editable fields: startDate, startTime, endDate, endTime
+            try {
+              if (copy.startDateTime) {
+                const sdt = new Date(copy.startDateTime);
+                if (!isNaN(sdt.getTime())) {
+                  // yyyy-mm-dd and HH:MM (24h)
+                  copy.startDate = sdt.toISOString().slice(0,10);
+                  copy.startTime = ('0' + sdt.getHours()).slice(-2) + ':' + ('0' + sdt.getMinutes()).slice(-2);
+                }
+              }
+            } catch(e) { console.warn('Error parsing startDateTime:', e); }
+            try {
+              if (copy.endDateTime) {
+                const edt = new Date(copy.endDateTime);
+                if (!isNaN(edt.getTime())) {
+                  copy.endDate = edt.toISOString().slice(0,10);
+                  copy.endTime = ('0' + edt.getHours()).slice(-2) + ':' + ('0' + edt.getMinutes()).slice(-2);
+                }
+              }
+            } catch(e) { console.warn('Error parsing endDateTime:', e); }
+
+            return copy;
+          });
+
+          console.log('Generated Events (normalized):', { count: normalized.length, sample: normalized.slice(0,5), type: Object.prototype.toString.call(evts) });
+          state.previewEvents = normalized || [];
+          state.existingEventsInWindow = existingEvents;
+          state.unifiedComparison = compareEvents(existingEvents, state.previewEvents);
+          
+          // === DEBUG: Full state.previewEvents after Preview ===
+          console.log('🔍 PREVIEW COMPLETED - state.previewEvents populated:');
+          console.log('  Count:', state.previewEvents.length);
+          console.log('  Full contents:', state.previewEvents);
+          console.log('  Sample with key fields:', state.previewEvents.slice(0, 3).map(ev => ({
+            title: ev.title,
+            startDate: ev.startDate,
+            startTime: ev.startTime,
+            endDate: ev.endDate,
+            endTime: ev.endTime,
+            hasStartDateTime: !!ev.startDateTime,
+            hasEndDateTime: !!ev.endDateTime
+          })));
+          // === END DEBUG ===
+          
+          console.debug('generatePreviewEvents -> success', { count: state.previewEvents.length, sample: state.previewEvents.slice(0,5) });
+          document.getElementById('formSection').style.display = 'none';
+          document.getElementById('previewSection').style.display = '';
+          setStepperProgress('addStepper', 2);
+          showInlineStatus('addStatusMessage', '', '');
+          updatePreviewMeta();
+          renderPreview();
+          if (!state.previewEvents.length) {
+            console.warn('No events generated. Check your date window, selected days, and DayTimes mappings.');
+          }
+        })
+        .catch(err => {
+          console.error('generatePreviewEvents failed', err);
+          // Also re-enable Create Events button on error
+          try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+        })
+        .finally(() => showSpinner(false));
+    });
+
+    // Add tab source loaders (always visible)
+    try {
+      const teacherSelect = document.getElementById('otherTeacherSelect');
+      const loadTeacherBtn = document.getElementById('loadOtherBtn');
+      const classSelect = document.getElementById('classSelect');
+      const loadClassBtn = document.getElementById('loadClassBtn');
+      const roomSelect = document.getElementById('roomSelect');
+      const loadRoomBtn = document.getElementById('loadRoomBtn');
+      const showTeacherBtn = document.getElementById('showLoadOtherBtn');
+      const showClassBtn = document.getElementById('showLoadClassesBtn');
+      const showRoomBtn = document.getElementById('showLoadRoomsBtn');
+
+      if (showTeacherBtn) {
+        showTeacherBtn.addEventListener('click', () => {
+          showTeacherBtn.style.display = 'none';
+          const wrap = document.getElementById('otherLoadWrap');
+          if (wrap) wrap.style.display = '';
+        });
+      }
+
+      if (showClassBtn) {
+        showClassBtn.addEventListener('click', () => {
+          showClassBtn.style.display = 'none';
+          const wrap = document.getElementById('classLoadWrap');
+          if (wrap) wrap.style.display = '';
+        });
+      }
+
+      if (showRoomBtn) {
+        showRoomBtn.addEventListener('click', () => {
+          showRoomBtn.style.display = 'none';
+          const wrap = document.getElementById('roomLoadWrap');
+          if (wrap) wrap.style.display = '';
+        });
+      }
+
+      if (loadTeacherBtn && teacherSelect) {
+        loadTeacherBtn.addEventListener('click', () => {
+          const email = (teacherSelect.value || '').toString().trim();
+          if (!email) { showInlineStatus('addStatusMessage', 'Select a teacher timetable first.', 'warning'); return; }
+          const teacherName = teacherSelect.options[teacherSelect.selectedIndex].text || email;
+          showLoadConfirmModal('Load Teacher Timetable', 'Load timetable for ' + teacherName + '?', () => rpc('getTeacherTimetable', email), { formContainerId: 'formRows', rowAdder: addRow });
+        });
+      }
+
+      if (loadClassBtn && classSelect) {
+        loadClassBtn.addEventListener('click', () => {
+          const className = (classSelect.value || '').toString().trim();
+          if (!className) { showInlineStatus('addStatusMessage', 'Select a class timetable first.', 'warning'); return; }
+          showLoadConfirmModal('Load Class Timetable', 'Load timetable for ' + className + '?', () => rpc('getClassTimetable', className), { formContainerId: 'formRows', rowAdder: addRow });
+        });
+      }
+
+      if (loadRoomBtn && roomSelect) {
+        loadRoomBtn.addEventListener('click', () => {
+          const roomName = (roomSelect.value || '').toString().trim();
+          if (!roomName) { showInlineStatus('addStatusMessage', 'Select a room timetable first.', 'warning'); return; }
+          showLoadConfirmModal('Load Room Timetable', 'Load timetable for ' + roomName + '?', () => rpc('getRoomTimetable', roomName), { formContainerId: 'formRows', rowAdder: addRow });
+        });
+      }
+    } catch (e) { console.warn('Add source loader wiring failed', e); }
+
+    // Load My Timetable button
+    try {
+      const loadMyTimetableBtn = document.getElementById('loadMyTimetableBtn');
+      if (loadMyTimetableBtn) {
+        loadMyTimetableBtn.addEventListener('click', () => {
+          showInlineStatus('addStatusMessage', '', '');
+          showLoadConfirmModal('Load My Timetable', 'Load your own timetable?', () => {
+            return rpc('getInitialData').then(data => {
+              return data.userTimetable || [];
+            });
+          }, { formContainerId: 'formRows', rowAdder: addRow });
+        });
+      }
+    } catch (e) { console.warn('Load My Timetable UI wiring failed', e); }
+
+    // Create
+    document.getElementById('createBtn').addEventListener('click', () => {
+      // === DEBUG: Full state.previewEvents when Create is clicked ===
+      console.log('🔍 CREATE CLICKED - Current state.previewEvents:');
+      console.log('  Count:', state.previewEvents.length);
+      console.log('  Full contents:', state.previewEvents);
+      console.log('  Sample with key fields:', state.previewEvents.slice(0, 3).map(ev => ({
+        title: ev.title,
+        startDate: ev.startDate,
+        startTime: ev.startTime,
+        endDate: ev.endDate,
+        endTime: ev.endTime,
+        hasStartDateTime: !!ev.startDateTime,
+        hasEndDateTime: !!ev.endDateTime
+      })));
+      // === END DEBUG ===
+      
+      if (!state.previewEvents.length) { showInlineStatus('addStatusMessage', 'No preview events available. Click Preview Events first.', 'warning'); return; }
+      const calSel = document.getElementById('viewCalendarSelect');
+      let calendarId = calSel.value;
+      const newNameEl = document.getElementById('newCalendarName');
+
+      const createRunner = () => {
+        setStepperProgress('addStepper', 3);
+        showInlineStatus('addStatusMessage', 'Step 3: Applying changes (delete unmatched + create/update events).', 'info');
+        const progress = document.getElementById('createProgress');
+        progress.style.display = '';
+        progress.textContent = 'Preparing changes…';
+        try { document.getElementById('createBtn').disabled = true; } catch (e) {}
+        showSpinner(true);
+        function toPayload(events) {
+          return (events || []).map(ev => {
+            const copy = Object.assign({}, ev);
+            const sDate = copy.startDate || '';
+            const sTime = copy.startTime || '';
+            const eDate = copy.endDate || copy.startDate || '';
+            const eTime = copy.endTime || '';
+            try { if (sDate && sTime) copy.startDateTime = new Date(sDate + 'T' + sTime + ':00').toISOString(); } catch(e) {}
+            try { if (eDate && eTime) copy.endDateTime = new Date(eDate + 'T' + eTime + ':00').toISOString(); } catch(e) {}
+            return copy;
+          });
+        }
+
+        const from = (document.getElementById('fromDate') || {}).value || '';
+        const to = (document.getElementById('toDate') || {}).value || '';
+        const previewTitleSet = new Set((state.previewEvents || []).map(ev => ((ev && ev.title) || '').toString().trim().toLowerCase()).filter(Boolean));
+
+        const reconcilePromise = (calendarId === '__new__')
+          ? Promise.resolve({ toDelete: [], toCreate: toPayload(state.previewEvents) })
+          : rpc('getEventsFromCalendarInRange', calendarId, from, to).then(existingEvents => {
+              state.existingEventsInWindow = existingEvents || [];
+              const cmp = compareEvents(state.existingEventsInWindow, state.previewEvents);
+              state.unifiedComparison = cmp;
+              updatePreviewMeta();
+
+              const orphanedScoped = (cmp.orphanedExisting || []).filter(ev => {
+                const t = ((ev && ev.title) || '').toString().trim().toLowerCase();
+                return !!t && previewTitleSet.has(t);
+              });
+
+              const toDelete = []
+                .concat((cmp.mismatched || []).map(m => m.existing))
+                .concat(orphanedScoped);
+              const toCreate = toPayload([].concat((cmp.mismatched || []).map(m => m.preview)).concat(cmp.newPreview || []));
+              return { toDelete: toDelete, toCreate: toCreate };
+            });
+
+        reconcilePromise
+          .then(plan => {
+            const toDelete = plan.toDelete || [];
+            const toCreate = plan.toCreate || [];
+
+            if (!toDelete.length && !toCreate.length) {
+              showInlineStatus('addStatusMessage', 'No changes detected. Everything is already in sync.', 'success');
+              return null;
+            }
+
+            const confirmMsg = 'Apply changes to this calendar?\\n\\nDelete: ' + toDelete.length + ' existing event(s)\\nCreate/Update: ' + toCreate.length + ' event(s)';
+            if (!window.confirm(confirmMsg)) throw new Error('USER_CANCELLED_APPLY');
+
+            const deletePromise = toDelete.length
+              ? rpc('deleteEventsByIds', calendarId, toDelete.map(ev => ev.id))
+              : Promise.resolve({ deleted: 0 });
+
+            return deletePromise.then(deleteResult => ({
+              deleted: (deleteResult && deleteResult.deleted) ? deleteResult.deleted : toDelete.length,
+              toCreate: toCreate
+            }));
+          })
+          .then(plan => {
+            if (!plan) return null;
+            if (!plan.toCreate.length) return { deleted: plan.deleted, created: 0, jobId: null };
+
+            progress.textContent = 'Installing per-user worker (may prompt for authorization)…';
+            return rpc('ensureUserWorkerTrigger')
+              .then(() => {
+                try { localStorage.setItem('schoogle_worker_installed','1'); } catch (e) {}
+                try { updateWorkerStatus(true); } catch (e) {}
+                progress.textContent = 'Enqueuing job for ' + plan.toCreate.length + ' events…';
+                return rpc('enqueueJob', plan.toCreate, calendarId).then(jobId => ({ deleted: plan.deleted, created: plan.toCreate.length, jobId: jobId }));
+              });
+          })
+          .then(result => {
+            if (!result) return;
+            progress.textContent = result.jobId ? ('Job queued: ' + result.jobId + '. Check Jobs tab for progress…') : 'Changes applied. No create job needed.';
+            showInlineStatus('addStatusMessage', 'Applied changes. Deleted ' + result.deleted + ' and queued ' + result.created + ' event(s).' + (result.jobId ? ' Job: ' + result.jobId : ''), 'success');
+
+            state.previewEvents = [];
+            state.unifiedComparison = null;
+            updatePreviewMeta();
+            renderPreview();
+
+            document.getElementById('formSection').style.display = '';
+            document.getElementById('previewSection').style.display = 'none';
+            setStepperProgress('addStepper', 1);
+
+            if (result.jobId) {
+              try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
+              try { setTimeout(() => { rpc('processUserJobs').catch(() => {}); }, 0); } catch (e) { /* ignore */ }
+              try { switchTab('jobsTab'); } catch (e) { /* ignore */ }
+              try { updateJobsUI(); } catch (e) { /* ignore */ }
+            }
+          })
+          .catch(err => {
+            if (err && err.message === 'USER_CANCELLED_APPLY') {
+              showInlineStatus('addStatusMessage', 'Apply canceled.', 'warning');
+              return;
+            }
+            console.error('Unified apply failed', err);
+            showInlineStatus('addStatusMessage', 'Failed to apply changes. Please retry.', 'danger');
+            alert('Failed to apply changes: ' + (err && err.message ? err.message : err));
+          })
+          .finally(() => {
+            try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+            showSpinner(false);
+          });
+      };
+
+      if (calendarId === '__new__') {
+        const name = newNameEl.value.trim();
+        if (!name) { alert('Enter a new calendar name.'); return; }
+        showInlineStatus('addStatusMessage', 'Creating new calendar "' + name + '" before queueing events...', 'info');
+        showSpinner(true);
+        rpc('createNewCalendar', name)
+          .then(id => {
+            calendarId = id;
+            try { calSel.value = id; } catch (e) {}
+            showInlineStatus('addStatusMessage', 'Calendar created. Queueing events next.', 'success');
+            loadCalendars();
+            createRunner();
+          })
+          .catch(err => {
+            console.error('createNewCalendar failed', err);
+            showInlineStatus('addStatusMessage', 'Failed to create calendar.', 'danger');
+            alert('Failed to create calendar: ' + (err && err.message ? err.message : err));
+            showSpinner(false);
+          });
+      } else {
+        createRunner();
+      }
+    });
+
+    // Unified job poller: polls listUserJobs and getSchoogleSpreadsheetUrl every 5s and updates all job-related UI
+    function stopJobsPoller() {
+      if (JOBS_POLL_TIMER) { clearInterval(JOBS_POLL_TIMER); JOBS_POLL_TIMER = null; }
+    }
+
+    // Convenience function to refresh jobs UI manually
+    function updateJobsUI() {
+      return Promise.all([
+        rpc('listUserJobs').then(result => Array.isArray(result) ? result : []).catch(() => []),
+        rpc('listUserJobEvents').then(result => Array.isArray(result) ? result : []).catch(() => []),
+        rpc('getSchoogleSpreadsheetUrl').catch(() => ({ url: null }))
+      ]).then(([jobSummary, jobEvents, schoogle]) => {
+        updateJobUIsFromList(jobSummary, jobEvents, schoogle);
+      });
+    }
+
+    // Toggle completed jobs section
+    function toggleCompletedJobs() {
+      const list = document.getElementById('completedJobsList');
+      const toggle = document.getElementById('completedToggle');
+      if (list.style.display === 'none') {
+        list.style.display = 'block';
+        toggle.textContent = '▲';
+        toggle.classList.remove('collapsed');
+      } else {
+        list.style.display = 'none';
+        toggle.textContent = '▼';
+        toggle.classList.add('collapsed');
+      }
+    }
+
+    function toggleQueuedJobs() {
+      const list = document.getElementById('queuedJobsList');
+      const toggle = document.getElementById('queuedToggle');
+      if (list.style.display === 'none') {
+        list.style.display = 'block';
+        toggle.textContent = '▼';
+        toggle.classList.remove('collapsed');
+      } else {
+        list.style.display = 'none';
+        toggle.textContent = '▲';
+        toggle.classList.add('collapsed');
+      }
+    }
+
+    function toggleRunningJobs() {
+      const list = document.getElementById('runningJobsList');
+      const toggle = document.getElementById('runningToggle');
+      if (list.style.display === 'none') {
+        list.style.display = 'block';
+        toggle.textContent = '▼';
+        toggle.classList.remove('collapsed');
+      } else {
+        list.style.display = 'none';
+        toggle.textContent = '▲';
+        toggle.classList.add('collapsed');
+      }
+    }
+    
+    // Make toggle functions globally accessible
+    window.toggleCompletedJobs = toggleCompletedJobs;
+    window.toggleQueuedJobs = toggleQueuedJobs;
+    window.toggleRunningJobs = toggleRunningJobs;
+
+      // Update spreadsheet link in progress area if available
+      try {
+        var linkContainer = document.getElementById('createProgressLink');
+        if (!linkContainer) {
+          linkContainer = document.createElement('span');
+          linkContainer.id = 'createProgressLink';
+          progress && progress.parentNode && progress.parentNode.appendChild(linkContainer);
+        }
+        if (running && (running.spreadsheetUrl || JOBS_POLL_SCHOOGLE_URL)) {
+          linkContainer.innerHTML = '';
+          var a = document.createElement('a');
+          a.href = running.spreadsheetUrl || JOBS_POLL_SCHOOGLE_URL;
+          a.target = '_blank';
+          a.textContent = 'Open spreadsheet';
+          a.style.marginLeft = '8px';
+          linkContainer.appendChild(a);
+        } else if (linkContainer) {
+          linkContainer.innerHTML = '';
+        }
+      } catch (e) { /* ignore UI errors */ }
+      // If a job just finished, reset preview state
+      const justDone = JOBS_POLL_LAST.find(j => j.status === 'done' && !j._uiDone);
+      if (justDone) {
+        justDone._uiDone = true;
+        // Removed automatic tab switch to View tab
+        // Optionally reload events for the relevant calendar
+        if (justDone.calendarId) {
+          document.getElementById('viewCalendarSelect').value = justDone.calendarId;
+          loadViewEvents(justDone.calendarId);
+        }
+        // Clear Preview state and UI so user cannot accidentally re-run the same preview
+        try {
+          state.previewEvents = [];
+          const previewContainer = document.getElementById('previewContainer');
+          if (previewContainer) previewContainer.innerHTML = '';
+          try { document.getElementById('createBtn').disabled = false; } catch (e) {}
+          // Don't clear date fields - they should persist for next use
+        } catch (e) { /* ignore UI errors */ }
+      }
+    }
+
+    // Back to form from preview
+    document.getElementById('backToFormBtn').addEventListener('click', () => {
+      document.getElementById('previewSection').style.display = 'none';
+      document.getElementById('formSection').style.display = '';
+      setStepperProgress('addStepper', 1);
+      // Keep current rows; user can edit and re-preview
+  console.debug('Back to form clicked');
+    });
+
+    // Step 1 calendar select
+    document.getElementById('viewCalendarSelect').addEventListener('change', (e) => {
+      const id = e.target.value;
+      updateExistingEventsHeader();
+      document.getElementById('newCalendarName').style.display = (id === '__new__') ? '' : 'none';
+      if (id && id !== '__new__') loadViewEvents(id);
+    });
+
+    // Initial data load
+    showSpinner(true);
+    console.debug('init() starting');
+    rpc('getInitialData')
+      .then(data => {
+        state.periods = data.periods || [];
+        state.dateWindows = data.dateWindows || [];
+        state.userEmail = data.userEmail || '';
+        updateWelcomeHeading();
+        setStepperProgress('addStepper', 1);
+        setStepperProgress('updateStepper', 1);
+        showInlineStatus('addStatusMessage', 'Step 1: Load a timetable source, then review the rows below.', 'info');
+        console.debug('Initial data loaded', { periodsCount: state.periods.length, userTimetableCount: (data.userTimetable||[]).length, defaultFrom: data.defaultFrom, defaultTo: data.defaultTo });
+        
+        // Set date values with better debugging
+        const fromDateEl = document.getElementById('fromDate');
+        const toDateEl = document.getElementById('toDate');
+        console.log('Date elements found:', { fromDateEl: !!fromDateEl, toDateEl: !!toDateEl });
+        
+        setupDateWindowPreset(data.defaultFrom, data.defaultTo);
+        
+        // Set Update tab dates
+        var _updateFromEl = document.getElementById('updateFromDate');
+        var _updateToEl = document.getElementById('updateToDate');
+        if (data.defaultFrom && _updateFromEl && !_updateFromEl.value) _updateFromEl.value = data.defaultFrom;
+        if (data.defaultTo && _updateToEl && !_updateToEl.value) _updateToEl.value = data.defaultTo;
+        
+        hydrateSourceSelectors();
+        loadCalendars();
+        // Start job polling
+        try { startJobsPoller(); } catch (e) { console.warn('startJobsPoller failed', e); }
+      })
+      .catch(err => {
+        console.error('getInitialData failed', err);
+        showAccessWarning('<strong>Access required.</strong> This app is intended for staff only. You do not appear to have access to the timetable resources needed to use it. Please contact a staff member if you believe this is incorrect.');
+        showInlineStatus('addStatusMessage', 'Unable to load timetable data.', 'danger');
+      })
+      .finally(() => showSpinner(false));
+
+  function renderViewEvents(events) {
+    const list = document.getElementById('viewList');
+    const openTitles = new Set(Array.from(list.querySelectorAll('details[open]')).map(d => (d.dataset.groupTitle || '').trim()).filter(Boolean));
+    list.innerHTML = '';
+    const groups = groupByTitle(events);
+    const titles = Object.keys(groups).sort();
+
+    titles.forEach(title => {
+      const details = document.createElement('details');
+      details.dataset.groupTitle = title;
+      if (openTitles.has(title)) details.open = true;
+      const summary = document.createElement('summary');
+      summary.textContent = title + ' (' + groups[title].length + ')';
+      
+      // Container for batch action buttons
+      const batchButtonsContainer = document.createElement('div');
+      batchButtonsContainer.className = 'batch-buttons';
+      batchButtonsContainer.style.marginLeft = '8px';
+      batchButtonsContainer.style.display = 'inline-block';
+      
+      // Add a batch edit title button at the group level
+      const editAllBtn = document.createElement('button');
+      editAllBtn.className = 'btn primary mini';
+      editAllBtn.style.marginRight = '4px';
+      editAllBtn.textContent = 'Edit titles';
+      editAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const calId = document.getElementById('viewCalendarSelect').value;
+        const calSelect = document.getElementById('viewCalendarSelect');
+        editAllBtn.disabled = true;
+        editAllBtn.textContent = 'Loading...';
+        calSelect.disabled = true;
+        showSpinner(true);
+        // Fetch Schoogle events for the calendar and filter client-side by title
+        rpc('getEventsFromCalendar', calId)
+          .then(list => {
+            showSpinner(false);
+            editAllBtn.disabled = false;
+            editAllBtn.textContent = 'Edit titles';
+            calSelect.disabled = false;
+            if (!list || !list.length) { alert('No Schoogle events found in this calendar.'); return; }
+            const matches = (list || []).filter(ev => {
+              try { return (ev.title || '').toString().trim().toLowerCase() === (title || '').toString().trim().toLowerCase(); } catch (e) { return false; }
+            });
+            if (!matches.length) { alert('No matching events found for "' + title + '".'); return; }
+            
+            // Build modal for batch title editing
+            const overlay = document.createElement('div');
+            overlay.id = 'schoogle-edit-title-modal';
+            overlay.className = 'schoogle-modal-overlay';
+            const box = document.createElement('div');
+            box.className = 'schoogle-modal-box';
+            const h = document.createElement('h3'); h.textContent = 'Batch edit titles for "' + title + '"'; box.appendChild(h);
+            
+            const titleInputContainer = document.createElement('div');
+            titleInputContainer.style.marginBottom = '16px';
+            const titleLabel = document.createElement('label');
+            titleLabel.textContent = 'New title:';
+            titleLabel.style.display = 'block';
+            titleLabel.style.marginBottom = '4px';
+            const titleInput = document.createElement('input');
+            titleInput.type = 'text';
+            titleInput.value = title;
+            titleInput.style.width = '100%';
+            titleInput.style.padding = '8px';
+            titleInput.style.border = '1px solid var(--border)';
+            titleInput.style.borderRadius = '4px';
+            titleInput.style.background = '#0f1525';
+            titleInput.style.color = 'var(--text)';
+            titleInputContainer.appendChild(titleLabel);
+            titleInputContainer.appendChild(titleInput);
+            box.appendChild(titleInputContainer);
+            
+            const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+            const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+            matches.forEach(ev => {
+              const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+              const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.eid = ev.id;
+              const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + fmt(ev.start) + ' → ' + fmt(ev.end) + (ev.location ? ' (' + ev.location + ')' : '');
+              li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+            });
+            box.appendChild(ul);
+            const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+            const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+            btnCancel.addEventListener('click', () => overlay.remove());
+            const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+            btnConfirm.addEventListener('click', () => {
+              const newTitle = titleInput.value.trim();
+              if (!newTitle) { alert('Please enter a new title.'); return; }
+              const selected = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.eid);
+              if (!selected.length) { alert('No events selected.'); return; }
+              btnConfirm.disabled = true;
+              btnConfirm.textContent = 'Updating...';
+              showSpinner(true);
+              rpc('updateEventTitlesByIds', calId, selected, newTitle)
+                .then(res => {
+                  overlay.remove();
+                  alert('Updated ' + (res.updated || 0) + ' events.');
+                  loadViewEvents(calId);
+                })
+                .catch(err => { 
+                  console.error('updateEventTitlesByIds failed', err); 
+                  alert('Update failed: ' + (err && err.message ? err.message : err));
+                  btnConfirm.disabled = false;
+                  btnConfirm.textContent = 'Update selected';
+                })
+                .finally(() => showSpinner(false));
+            });
+            btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+            overlay.appendChild(box); document.body.appendChild(overlay);
+          })
+          .catch(err => { 
+            showSpinner(false); 
+            editAllBtn.disabled = false;
+            editAllBtn.textContent = 'Edit titles';
+            document.getElementById('viewCalendarSelect').disabled = false;
+            console.error('getEventsFromCalendar failed', err); 
+            alert('Failed to list events: ' + (err && err.message ? err.message : err)); 
+          });
+      });
+      batchButtonsContainer.appendChild(editAllBtn);
+      
+      // Add a batch edit color button at the group level
+      const colorAllBtn = document.createElement('button');
+      colorAllBtn.className = 'btn primary mini';
+      colorAllBtn.style.marginRight = '4px';
+      colorAllBtn.textContent = 'Edit colors';
+      colorAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const calId = document.getElementById('viewCalendarSelect').value;
+        const calSelect = document.getElementById('viewCalendarSelect');
+        colorAllBtn.disabled = true;
+        colorAllBtn.textContent = 'Loading...';
+        calSelect.disabled = true;
+        showSpinner(true);
+        // Fetch Schoogle events for the calendar and filter client-side by title
+        rpc('getEventsFromCalendar', calId)
+          .then(list => {
+            showSpinner(false);
+            colorAllBtn.disabled = false;
+            colorAllBtn.textContent = 'Edit colors';
+            calSelect.disabled = false;
+            if (!list || !list.length) { alert('No Schoogle events found in this calendar.'); return; }
+            const matches = (list || []).filter(ev => {
+              try { return (ev.title || '').toString().trim().toLowerCase() === (title || '').toString().trim().toLowerCase(); } catch (e) { return false; }
+            });
+            if (!matches.length) { alert('No matching events found for "' + title + '".'); return; }
+            
+            // Build modal for batch color editing
+            const overlay = document.createElement('div');
+            overlay.id = 'schoogle-edit-color-modal';
+            overlay.className = 'schoogle-modal-overlay';
+            const box = document.createElement('div');
+            box.className = 'schoogle-modal-box';
+            const h = document.createElement('h3'); h.textContent = 'Batch edit colors for "' + title + '"'; box.appendChild(h);
+            
+            const colorInputContainer = document.createElement('div');
+            colorInputContainer.style.marginBottom = '16px';
+            const colorLabel = document.createElement('label');
+            colorLabel.textContent = 'Select color:';
+            colorLabel.style.display = 'block';
+            colorLabel.style.marginBottom = '4px';
+            
+            const colorPicker = createColorPicker(null, null);
+            
+            colorInputContainer.appendChild(colorLabel);
+            colorInputContainer.appendChild(colorPicker.element);
+            box.appendChild(colorInputContainer);
+            
+            const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+            const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+            matches.forEach(ev => {
+              const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+              const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.eid = ev.id;
+              const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + fmt(ev.start) + ' → ' + fmt(ev.end) + (ev.location ? ' (' + ev.location + ')' : '');
+              li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+            });
+            box.appendChild(ul);
+            const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+            const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+            btnCancel.addEventListener('click', () => overlay.remove());
+            const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+            btnConfirm.addEventListener('click', () => {
+              const selectedColor = colorPicker.getSelectedColor();
+              if (!selectedColor) { alert('Please select a color.'); return; }
+              const selected = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.eid);
+              if (!selected.length) { alert('No events selected.'); return; }
+              btnConfirm.disabled = true;
+              btnConfirm.textContent = 'Updating...';
+              showSpinner(true);
+              rpc('updateEventColorsByIds', calId, selected, selectedColor)
+                .then(res => {
+                  overlay.remove();
+                  alert('Updated ' + (res.updated || 0) + ' events.');
+                  loadViewEvents(calId);
+                })
+                .catch(err => { 
+                  console.error('updateEventColorsByIds failed', err); 
+                  alert('Update failed: ' + (err && err.message ? err.message : err));
+                  btnConfirm.disabled = false;
+                  btnConfirm.textContent = 'Update selected';
+                })
+                .finally(() => showSpinner(false));
+            });
+            btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+            overlay.appendChild(box); document.body.appendChild(overlay);
+          })
+          .catch(err => { 
+            showSpinner(false); 
+            colorAllBtn.disabled = false;
+            colorAllBtn.textContent = 'Edit colors';
+            document.getElementById('viewCalendarSelect').disabled = false;
+            console.error('getEventsFromCalendar failed', err); 
+            alert('Failed to list events: ' + (err && err.message ? err.message : err)); 
+          });
+      });
+      batchButtonsContainer.appendChild(colorAllBtn);
+      
+      // Add a batch invite button at the group level for View tab
+      const inviteAllBtn = document.createElement('button');
+      inviteAllBtn.className = 'btn secondary mini';
+      inviteAllBtn.style.marginRight = '4px';
+      inviteAllBtn.textContent = 'Edit invites';
+      inviteAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const calId = document.getElementById('viewCalendarSelect').value;
+        const calSelect = document.getElementById('viewCalendarSelect');
+        inviteAllBtn.disabled = true;
+        inviteAllBtn.textContent = 'Loading...';
+        calSelect.disabled = true;
+        showSpinner(true);
+        // Fetch Schoogle events for the calendar and filter client-side by title
+        rpc('getEventsFromCalendar', calId)
+          .then(list => {
+            showSpinner(false);
+            inviteAllBtn.disabled = false;
+            inviteAllBtn.textContent = 'Edit invites';
+            calSelect.disabled = false;
+            if (!list || !list.length) { alert('No Schoogle events found in this calendar.'); return; }
+            const matches = (list || []).filter(ev => {
+              try { return (ev.title || '').toString().trim().toLowerCase() === (title || '').toString().trim().toLowerCase(); } catch (e) { return false; }
+            });
+            if (!matches.length) { alert('No matching events found for "' + title + '".'); return; }
+            
+            // Build modal for batch invitation editing
+            const overlay = document.createElement('div');
+            overlay.id = 'view-edit-invites-modal';
+            overlay.className = 'schoogle-modal-overlay';
+            const box = document.createElement('div');
+            box.className = 'schoogle-modal-box';
+            const h = document.createElement('h3'); h.textContent = 'Batch edit invitations for "' + title + '"'; box.appendChild(h);
+            
+            const inviteInputContainer = document.createElement('div');
+            inviteInputContainer.style.marginBottom = '16px';
+            const inviteLabel = document.createElement('label');
+            inviteLabel.textContent = 'Email addresses (comma-separated):';
+            inviteLabel.style.display = 'block';
+            inviteLabel.style.marginBottom = '4px';
+            
+            const inviteInput = document.createElement('textarea');
+            inviteInput.style.width = '100%';
+            inviteInput.style.height = '80px';
+            inviteInput.style.padding = '8px';
+            inviteInput.style.border = '1px solid var(--border)';
+            inviteInput.style.borderRadius = '4px';
+            inviteInput.style.background = '#ffffff';
+            inviteInput.style.color = '#111111';
+            inviteInput.style.fontFamily = 'inherit';
+            inviteInput.style.fontSize = '14px';
+            inviteInput.style.resize = 'vertical';
+            inviteInput.placeholder = 'user1@example.com, user2@example.com, user3@example.com';
+            
+            // Check if any events already have invites set and pre-populate
+            const existingInvites = matches.find(ev => ev.inviteEmails || ev.attendees);
+            if (existingInvites) {
+              if (existingInvites.inviteEmails) {
+                inviteInput.value = Array.isArray(existingInvites.inviteEmails) ? existingInvites.inviteEmails.join(', ') : existingInvites.inviteEmails;
+              } else if (existingInvites.attendees && Array.isArray(existingInvites.attendees)) {
+                const emails = existingInvites.attendees.map(a => a.email || a).filter(e => e);
+                inviteInput.value = emails.join(', ');
+              }
+            }
+            
+            const helpText = document.createElement('div');
+            helpText.style.fontSize = '12px';
+            helpText.style.color = 'var(--muted)';
+            helpText.style.marginTop = '4px';
+            helpText.textContent = 'Enter email addresses separated by commas. These users will be invited to the selected events.';
+            
+            inviteInputContainer.appendChild(inviteLabel);
+            inviteInputContainer.appendChild(inviteInput);
+            inviteInputContainer.appendChild(helpText);
+            box.appendChild(inviteInputContainer);
+            
+            const desc = document.createElement('div'); desc.textContent = 'Select events to update:'; box.appendChild(desc);
+            const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+            matches.forEach(ev => {
+              const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+              const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.eid = ev.id;
+              const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + fmt(ev.start) + ' → ' + fmt(ev.end) + (ev.location ? ' (' + ev.location + ')' : '');
+              li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+            });
+            box.appendChild(ul);
+            const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+            const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+            btnCancel.addEventListener('click', () => overlay.remove());
+            const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn primary'; btnConfirm.textContent = 'Update selected';
+            btnConfirm.addEventListener('click', () => {
+              const emailString = inviteInput.value.trim();
+              const selected = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.eid);
+              if (!selected.length) { alert('No events selected.'); return; }
+              
+              // Parse and validate email addresses
+              let emails = [];
+              if (emailString) {
+                emails = emailString.split(',').map(email => email.trim()).filter(email => {
+                  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                  return emailRegex.test(email);
+                });
+                
+                if (emailString && emails.length === 0) {
+                  alert('Please enter valid email addresses.');
+                  return;
+                }
+              }
+              
+              btnConfirm.disabled = true;
+              btnConfirm.textContent = 'Updating...';
+              showSpinner(true);
+              rpc('updateEventInvitesByIds', calId, selected, emails)
+                .then(res => {
+                  overlay.remove();
+                  alert('Updated invitations for ' + (res.updated || 0) + ' events.' + (emails.length > 0 ? ' (' + emails.length + ' invitees)' : ' (cleared invitations)'));
+                  loadViewEvents(calId);
+                })
+                .catch(err => { 
+                  console.error('updateEventInvitesByIds failed', err); 
+                  alert('Update failed: ' + (err && err.message ? err.message : err));
+                  btnConfirm.disabled = false;
+                  btnConfirm.textContent = 'Update selected';
+                })
+                .finally(() => showSpinner(false));
+            });
+            btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+            overlay.appendChild(box); document.body.appendChild(overlay);
+          })
+          .catch(err => { 
+            showSpinner(false); 
+            inviteAllBtn.disabled = false;
+            inviteAllBtn.textContent = 'Edit invites';
+            document.getElementById('viewCalendarSelect').disabled = false;
+            console.error('getEventsFromCalendar failed', err); 
+            alert('Failed to list events: ' + (err && err.message ? err.message : err)); 
+          });
+      });
+      batchButtonsContainer.appendChild(inviteAllBtn);
+      
+      // Add a delete-all button at the group level
+      const deleteAllBtn = document.createElement('button');
+      deleteAllBtn.className = 'btn danger mini';
+      deleteAllBtn.textContent = 'Delete all';
+      deleteAllBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const calId = document.getElementById('viewCalendarSelect').value;
+        const calSelect = document.getElementById('viewCalendarSelect');
+        deleteAllBtn.disabled = true;
+        deleteAllBtn.textContent = 'Loading...';
+        calSelect.disabled = true;
+        showSpinner(true);
+        // Fetch Schoogle events for the calendar and filter client-side by title
+        rpc('getEventsFromCalendar', calId)
+          .then(list => {
+            showSpinner(false);
+            deleteAllBtn.disabled = false;
+            deleteAllBtn.textContent = 'Delete all';
+            calSelect.disabled = false;
+            if (!list || !list.length) { alert('No Schoogle events found in this calendar.'); return; }
+            const matches = (list || []).filter(ev => {
+              try { return (ev.title || '').toString().trim().toLowerCase() === (title || '').toString().trim().toLowerCase(); } catch (e) { return false; }
+            });
+            if (!matches.length) { alert('No matching events found for "' + title + '".'); return; }
+            // Build modal using site-styled classes
+            const overlay = document.createElement('div');
+            overlay.id = 'schoogle-delete-modal';
+            overlay.className = 'schoogle-modal-overlay';
+            const box = document.createElement('div');
+            box.className = 'schoogle-modal-box';
+            const h = document.createElement('h3'); h.textContent = 'Confirm delete events for "' + title + '"'; box.appendChild(h);
+            const desc = document.createElement('div'); desc.textContent = 'Select events to delete:'; box.appendChild(desc);
+            const ul = document.createElement('ul'); ul.style.listStyle = 'none'; ul.style.padding = '0'; ul.style.margin = '8px 0 16px 0';
+            matches.forEach(ev => {
+              const li = document.createElement('li'); li.style.padding = '6px 0'; li.style.borderBottom = '1px solid #eee';
+              const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true; chk.style.marginRight = '8px'; chk.dataset.eid = ev.id;
+              const txt = document.createElement('span'); txt.textContent = ev.title + ' — ' + fmt(ev.start) + ' → ' + fmt(ev.end) + (ev.location ? ' (' + ev.location + ')' : '');
+              li.appendChild(chk); li.appendChild(txt); ul.appendChild(li);
+            });
+            box.appendChild(ul);
+            const btnBar = document.createElement('div'); btnBar.style.textAlign = 'right'; btnBar.style.marginTop = '8px';
+            const btnCancel = document.createElement('button'); btnCancel.className = 'btn'; btnCancel.textContent = 'Cancel'; btnCancel.style.marginRight = '8px';
+            btnCancel.addEventListener('click', () => overlay.remove());
+            const btnConfirm = document.createElement('button'); btnConfirm.className = 'btn danger'; btnConfirm.textContent = 'Delete selected';
+            btnConfirm.addEventListener('click', () => {
+              const selected = Array.from(ul.querySelectorAll('input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.eid);
+              if (!selected.length) { alert('No events selected.'); return; }
+              btnConfirm.disabled = true;
+              btnConfirm.textContent = 'Deleting...';
+              showSpinner(true);
+              rpc('deleteEventsByIds', calId, selected)
+                .then(res => {
+                  overlay.remove();
+                  alert('Deleted ' + (res.deleted || 0) + ' events.');
+                  loadViewEvents(calId);
+                })
+                .catch(err => { 
+                  console.error('deleteEventsByIds failed', err); 
+                  alert('Delete failed: ' + (err && err.message ? err.message : err));
+                  btnConfirm.disabled = false;
+                  btnConfirm.textContent = 'Delete selected';
+                })
+                .finally(() => showSpinner(false));
+            });
+            btnBar.appendChild(btnCancel); btnBar.appendChild(btnConfirm); box.appendChild(btnBar);
+            overlay.appendChild(box); document.body.appendChild(overlay);
+          })
+          .catch(err => { 
+            showSpinner(false); 
+            deleteAllBtn.disabled = false;
+            deleteAllBtn.textContent = 'Delete all';
+            document.getElementById('viewCalendarSelect').disabled = false;
+            console.error('getEventsFromCalendar failed', err); 
+            alert('Failed to list events: ' + (err && err.message ? err.message : err)); 
+          });
+      });
+      batchButtonsContainer.appendChild(deleteAllBtn);
+      
+      summary.appendChild(batchButtonsContainer);
+      details.appendChild(summary);
+
+      const ul = document.createElement('ul');
+      ul.className = 'event-list';
+
+      groups[title].forEach(ev => {
+        const li = document.createElement('li');
+        li.className = 'event-item';
+        li.style.padding = '12px';
+        li.style.border = '1px solid var(--border)';
+        li.style.borderRadius = '8px';
+        li.style.marginBottom = '8px';
+
+        // Create display container for static info
+        const displayContainer = document.createElement('div');
+        displayContainer.className = 'event-display';
+        
+        const titleDisplay = document.createElement('div');
+        titleDisplay.style.fontWeight = '600';
+        titleDisplay.style.marginBottom = '4px';
+        titleDisplay.textContent = ev.title;
+        // Add SchoogleID as tooltip
+        if (ev.schoogleEventId) {
+          titleDisplay.title = 'SchoogleID: ' + ev.schoogleEventId;
+          titleDisplay.style.cursor = 'help';
+        }
+        
+        const timeDisplay = document.createElement('div');
+        timeDisplay.className = 'event-time';
+        timeDisplay.style.marginBottom = '4px';
+        timeDisplay.textContent = fmt(ev.start) + ' → ' + fmt(ev.end);
+        
+        const colorDisplay = document.createElement('div');
+        colorDisplay.style.fontSize = '12px';
+        colorDisplay.style.color = 'var(--muted)';
+        colorDisplay.style.marginBottom = '4px';
+        colorDisplay.textContent = 'Color: ' + getColorNameFromId(ev.colorId || '1');
+        
+        // Add SchoogleID display
+        const schoogleIdDisplay = document.createElement('div');
+        schoogleIdDisplay.style.fontSize = '11px';
+        schoogleIdDisplay.style.color = 'var(--muted)';
+        schoogleIdDisplay.style.marginBottom = '8px';
+        schoogleIdDisplay.style.fontFamily = 'monospace';
+        if (ev.schoogleEventId) {
+          schoogleIdDisplay.textContent = 'SchoogleID: ' + ev.schoogleEventId;
+          schoogleIdDisplay.title = 'Click to copy';
+          schoogleIdDisplay.style.cursor = 'pointer';
+          schoogleIdDisplay.addEventListener('click', () => {
+            navigator.clipboard.writeText(ev.schoogleEventId).then(() => {
+              const originalText = schoogleIdDisplay.textContent;
+              schoogleIdDisplay.textContent = 'SchoogleID: ' + ev.schoogleEventId + ' (copied!)';
+              setTimeout(() => {
+                schoogleIdDisplay.textContent = originalText;
+              }, 1500);
+            }).catch(() => {
+              // Fallback for older browsers
+              const textArea = document.createElement('textarea');
+              textArea.value = ev.schoogleEventId;
+              document.body.appendChild(textArea);
+              textArea.select();
+              document.execCommand('copy');
+              document.body.removeChild(textArea);
+              const originalText = schoogleIdDisplay.textContent;
+              schoogleIdDisplay.textContent = 'SchoogleID: ' + ev.schoogleEventId + ' (copied!)';
+              setTimeout(() => {
+                schoogleIdDisplay.textContent = originalText;
+              }, 1500);
+            });
+          });
+        } else {
+          schoogleIdDisplay.textContent = 'SchoogleID: (not set)';
+        }
+        
+        // Add Invitations display
+        const invitesDisplay = document.createElement('div');
+        invitesDisplay.style.fontSize = '11px';
+        invitesDisplay.style.color = 'var(--muted)';
+        invitesDisplay.style.marginBottom = '8px';
+        invitesDisplay.style.fontFamily = 'monospace';
+        if (ev.inviteEmails && Array.isArray(ev.inviteEmails) && ev.inviteEmails.length > 0) {
+          invitesDisplay.textContent = 'Invites: ' + ev.inviteEmails.join(', ');
+          invitesDisplay.title = 'Click to copy emails';
+          invitesDisplay.style.cursor = 'pointer';
+          invitesDisplay.addEventListener('click', () => {
+            const emailsText = ev.inviteEmails.join(', ');
+            navigator.clipboard.writeText(emailsText).then(() => {
+              const originalText = invitesDisplay.textContent;
+              invitesDisplay.textContent = 'Invites: ' + emailsText + ' (copied!)';
+              setTimeout(() => {
+                invitesDisplay.textContent = originalText;
+              }, 1500);
+            }).catch(() => {
+              // Fallback for older browsers
+              const textArea = document.createElement('textarea');
+              textArea.value = emailsText;
+              document.body.appendChild(textArea);
+              textArea.select();
+              document.execCommand('copy');
+              document.body.removeChild(textArea);
+              const originalText = invitesDisplay.textContent;
+              invitesDisplay.textContent = 'Invites: ' + emailsText + ' (copied!)';
+              setTimeout(() => {
+                invitesDisplay.textContent = originalText;
+              }, 1500);
+            });
+          });
+        } else if (ev.attendees && Array.isArray(ev.attendees) && ev.attendees.length > 0) {
+          const emails = ev.attendees.map(a => a.email || a).filter(e => e);
+          if (emails.length > 0) {
+            invitesDisplay.textContent = 'Attendees: ' + emails.join(', ');
+            invitesDisplay.title = 'Click to copy emails';
+            invitesDisplay.style.cursor = 'pointer';
+            invitesDisplay.addEventListener('click', () => {
+              const emailsText = emails.join(', ');
+              navigator.clipboard.writeText(emailsText).then(() => {
+                const originalText = invitesDisplay.textContent;
+                invitesDisplay.textContent = 'Attendees: ' + emailsText + ' (copied!)';
+                setTimeout(() => {
+                  invitesDisplay.textContent = originalText;
+                }, 1500);
+              }).catch(() => {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = emailsText;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                const originalText = invitesDisplay.textContent;
+                invitesDisplay.textContent = 'Attendees: ' + emailsText + ' (copied!)';
+                setTimeout(() => {
+                  invitesDisplay.textContent = originalText;
+                }, 1500);
+              });
+            });
+          } else {
+            invitesDisplay.textContent = 'Invites: (none)';
+          }
+        } else {
+          invitesDisplay.textContent = 'Invites: (none)';
+        }
+        
+        displayContainer.appendChild(titleDisplay);
+        displayContainer.appendChild(timeDisplay);
+        displayContainer.appendChild(colorDisplay);
+        displayContainer.appendChild(schoogleIdDisplay);
+        displayContainer.appendChild(invitesDisplay);
+        
+        // Create edit container (hidden initially)
+        const editContainer = document.createElement('div');
+        editContainer.className = 'event-edit';
+        editContainer.style.display = 'none';
+        
+        // Title input
+        const titleInput = document.createElement('input');
+        titleInput.type = 'text';
+        titleInput.value = ev.title;
+        titleInput.className = 'event-title-edit';
+        titleInput.style.marginBottom = '8px';
+        titleInput.style.width = '100%';
+        
+        // Date and time inputs
+        const dateTimeContainer = document.createElement('div');
+        dateTimeContainer.style.display = 'grid';
+        dateTimeContainer.style.gridTemplateColumns = '1fr 1fr 1fr 1fr';
+        dateTimeContainer.style.gap = '8px';
+        dateTimeContainer.style.marginBottom = '8px';
+        
+        const startDateInput = document.createElement('input');
+        startDateInput.type = 'date';
+        const startDateTime = formatDateTimeForEdit(ev.start);
+        startDateInput.value = startDateTime.date;
+        
+        const startTimeInput = document.createElement('input');
+        startTimeInput.type = 'time';
+        startTimeInput.value = startDateTime.time;
+        
+        const endDateInput = document.createElement('input');
+        endDateInput.type = 'date';
+        const endDateTime = formatDateTimeForEdit(ev.end);
+        endDateInput.value = endDateTime.date;
+        
+        const endTimeInput = document.createElement('input');
+        endTimeInput.type = 'time';
+        endTimeInput.value = endDateTime.time;
+        
+        dateTimeContainer.appendChild(startDateInput);
+        dateTimeContainer.appendChild(startTimeInput);
+        dateTimeContainer.appendChild(endDateInput);
+        dateTimeContainer.appendChild(endTimeInput);
+        
+        // Color picker for individual events
+        const colorContainer = document.createElement('div');
+        colorContainer.style.marginBottom = '8px';
+        
+        const colorLabel = document.createElement('label');
+        colorLabel.textContent = 'Color:';
+        colorLabel.style.display = 'block';
+        colorLabel.style.marginBottom = '4px';
+        colorLabel.style.fontSize = '12px';
+        
+        const colorPicker = createColorPicker(ev.colorId || '1', null);
+        colorPicker.element.style.maxHeight = '120px';
+        colorPicker.element.style.gridTemplateColumns = 'repeat(auto-fit, minmax(80px, 1fr))';
+        
+        colorContainer.appendChild(colorLabel);
+        colorContainer.appendChild(colorPicker.element);
+        
+        // SchoogleID input
+        const schoogleIdContainer = document.createElement('div');
+        schoogleIdContainer.style.marginBottom = '8px';
+        
+        const schoogleIdLabel = document.createElement('label');
+        schoogleIdLabel.textContent = 'SchoogleID:';
+        schoogleIdLabel.style.display = 'block';
+        schoogleIdLabel.style.marginBottom = '4px';
+        schoogleIdLabel.style.fontSize = '12px';
+        
+        const schoogleIdInput = document.createElement('input');
+        schoogleIdInput.type = 'text';
+        schoogleIdInput.value = ev.schoogleEventId || '';
+        schoogleIdInput.style.width = '100%';
+        schoogleIdInput.style.padding = '4px 8px';
+        schoogleIdInput.style.border = '1px solid var(--border)';
+        schoogleIdInput.style.borderRadius = '4px';
+        schoogleIdInput.style.background = '#0f1525';
+        schoogleIdInput.style.color = 'var(--text)';
+        schoogleIdInput.style.fontFamily = 'monospace';
+        schoogleIdInput.style.fontSize = '11px';
+        schoogleIdInput.placeholder = 'Enter SchoogleID...';
+        
+        schoogleIdContainer.appendChild(schoogleIdLabel);
+        schoogleIdContainer.appendChild(schoogleIdInput);
+        
+        // Invitations input
+        const invitesContainer = document.createElement('div');
+        invitesContainer.style.marginBottom = '8px';
+        
+        const invitesLabel = document.createElement('label');
+        invitesLabel.textContent = 'Invitations (comma-separated emails):';
+        invitesLabel.style.display = 'block';
+        invitesLabel.style.marginBottom = '4px';
+        invitesLabel.style.fontSize = '12px';
+        
+        const invitesInput = document.createElement('textarea');
+        invitesInput.style.width = '100%';
+        invitesInput.style.height = '60px';
+        invitesInput.style.padding = '4px 8px';
+        invitesInput.style.border = '1px solid var(--border)';
+        invitesInput.style.borderRadius = '4px';
+        invitesInput.style.background = '#ffffff';
+        invitesInput.style.color = '#111111';
+        invitesInput.style.fontFamily = 'inherit';
+        invitesInput.style.fontSize = '12px';
+        invitesInput.style.resize = 'vertical';
+        invitesInput.placeholder = 'user1@example.com, user2@example.com';
+        
+        // Pre-populate with existing invites
+        if (ev.inviteEmails && Array.isArray(ev.inviteEmails)) {
+          invitesInput.value = ev.inviteEmails.join(', ');
+        } else if (ev.attendees && Array.isArray(ev.attendees)) {
+          const emails = ev.attendees.map(a => a.email || a).filter(e => e);
+          invitesInput.value = emails.join(', ');
+        }
+        
+        invitesContainer.appendChild(invitesLabel);
+        invitesContainer.appendChild(invitesInput);
+        
+        editContainer.appendChild(titleInput);
+        editContainer.appendChild(dateTimeContainer);
+        editContainer.appendChild(colorContainer);
+        editContainer.appendChild(schoogleIdContainer);
+        editContainer.appendChild(invitesContainer);
+        
+        // Button container
+        const buttonContainer = document.createElement('div');
+        buttonContainer.style.display = 'flex';
+        buttonContainer.style.gap = '8px';
+        buttonContainer.style.marginTop = '8px';
+
+        const editBtn = document.createElement('button');
+        editBtn.textContent = 'Edit';
+        editBtn.className = 'btn mini';
+        editBtn.addEventListener('click', () => {
+          if (editBtn.textContent === 'Edit') {
+            // Switch to edit mode
+            displayContainer.style.display = 'none';
+            editContainer.style.display = 'block';
+            editBtn.textContent = 'Save';
+            editBtn.className = 'btn success mini';
+          } else {
+            // Save changes
+            editBtn.disabled = true;
+            editBtn.textContent = 'Saving...';
+            showSpinner(true);
+            
+            const updates = {
+              title: titleInput.value,
+              startDate: startDateInput.value,
+              startTime: startTimeInput.value,
+              endDate: endDateInput.value,
+              endTime: endTimeInput.value,
+              colorId: colorPicker.getSelectedColor(),
+              schoogleEventId: schoogleIdInput.value.trim() || null,
+              inviteEmails: (() => {
+                const emailString = invitesInput.value.trim();
+                if (!emailString) return null;
+                const emails = emailString.split(',').map(email => email.trim()).filter(email => {
+                  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                  return emailRegex.test(email);
+                });
+                return emails.length > 0 ? emails : null;
+              })()
+            };
+            
+            rpc('updateCalendarEventFull', document.getElementById('viewCalendarSelect').value, ev.id, updates)
+              .then(() => {
+                // Update local event data
+                ev.title = updates.title;
+                ev.colorId = updates.colorId;
+                ev.schoogleEventId = updates.schoogleEventId;
+                ev.inviteEmails = updates.inviteEmails;
+                const preservedOpen = Array.from(document.querySelectorAll('#viewList details[open]')).map(d => d.dataset.groupTitle).filter(Boolean);
+                loadViewEvents(document.getElementById('viewCalendarSelect').value); // Reload to get fresh data
+                setTimeout(() => {
+                  const list = document.getElementById('viewList');
+                  if (!list) return;
+                  Array.from(list.querySelectorAll('details')).forEach(d => {
+                    if (preservedOpen.indexOf(d.dataset.groupTitle) !== -1) d.open = true;
+                  });
+                }, 0);
+              })
+              .catch(err => {
+                console.error('updateCalendarEventFull failed', err);
+                editBtn.disabled = false;
+                editBtn.textContent = 'Save';
+                alert('Update failed: ' + (err && err.message ? err.message : err));
+              })
+              .finally(() => showSpinner(false));
+          }
+        });
+        
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.className = 'btn mini';
+        cancelBtn.style.display = 'none';
+        cancelBtn.addEventListener('click', () => {
+          // Switch back to display mode
+          displayContainer.style.display = 'block';
+          editContainer.style.display = 'none';
+          editBtn.textContent = 'Edit';
+          editBtn.className = 'btn mini';
+          cancelBtn.style.display = 'none';
+          
+          // Reset form values
+          titleInput.value = ev.title;
+          const resetStartDateTime = formatDateTimeForEdit(ev.start);
+          const resetEndDateTime = formatDateTimeForEdit(ev.end);
+          startDateInput.value = resetStartDateTime.date;
+          startTimeInput.value = resetStartDateTime.time;
+          endDateInput.value = resetEndDateTime.date;
+          endTimeInput.value = resetEndDateTime.time;
+          schoogleIdInput.value = ev.schoogleEventId || '';
+          // Reset invitations
+          if (ev.inviteEmails && Array.isArray(ev.inviteEmails)) {
+            invitesInput.value = ev.inviteEmails.join(', ');
+          } else if (ev.attendees && Array.isArray(ev.attendees)) {
+            const emails = ev.attendees.map(a => a.email || a).filter(e => e);
+            invitesInput.value = emails.join(', ');
+          } else {
+            invitesInput.value = '';
+          }
+        });
+        
+        // Show/hide cancel button based on edit mode
+        const observer = new MutationObserver(() => {
+          if (editContainer.style.display === 'none') {
+            cancelBtn.style.display = 'none';
+          } else {
+            cancelBtn.style.display = 'inline-block';
+          }
+        });
+        observer.observe(editContainer, { attributes: true, attributeFilter: ['style'] });
+
+        const delBtn = document.createElement('button');
+        delBtn.textContent = 'Delete';
+        delBtn.className = 'btn danger mini';
+        delBtn.addEventListener('click', () => {
+          if (!confirm('Delete this event?')) return;
+          delBtn.disabled = true;
+          delBtn.textContent = 'Deleting...';
+          showSpinner(true);
+          rpc('deleteCalendarEvent', document.getElementById('viewCalendarSelect').value, ev.id)
+            .then(() => {
+              const idx = events.indexOf(ev);
+              if (idx > -1) events.splice(idx, 1);
+              renderViewEvents(events);
+            })
+            .catch(err => {
+              console.error('deleteCalendarEvent failed', err);
+              delBtn.disabled = false;
+              delBtn.textContent = 'Delete';
+              alert('Delete failed: ' + (err && err.message ? err.message : err));
+            })
+            .finally(() => showSpinner(false));
+        });
+        
+        const openBtn = document.createElement('button');
+        openBtn.textContent = 'Open';
+        openBtn.className = 'btn mini';
+        openBtn.addEventListener('click', () => {
+          window.open(ev.htmlLink, '_blank');
+        });
+
+        buttonContainer.appendChild(editBtn);
+        buttonContainer.appendChild(cancelBtn);
+        buttonContainer.appendChild(delBtn);
+        buttonContainer.appendChild(openBtn);
+
+        li.appendChild(displayContainer);
+        li.appendChild(editContainer);
+        li.appendChild(buttonContainer);
+        ul.appendChild(li);
+      });
+
+      details.appendChild(ul);
+      list.appendChild(details);
+    });
+  }
+
+  function loadViewEvents(calendarId) {
+    showSpinner(true);
+    const from = (document.getElementById('fromDate') || {}).value || '';
+    const to = (document.getElementById('toDate') || {}).value || '';
+    updateExistingEventsHeader();
+    rpc('getEventsFromCalendarInRange', calendarId, from, to)
+      .then(events => {
+        renderViewEvents(events || []);
+        state.existingEventsInWindow = events || [];
+      })
+      .catch(err => console.error('getEventsFromCalendar failed', err))
+      .finally(() => showSpinner(false));
+  }
+
+  // Test function to verify server functions return arrays (can be removed after testing)
+  function testServerFunctions() {
+    console.log('Testing server functions...');
+    rpc('listUserJobs')
+      .then(result => {
+        console.log('listUserJobs result:', result, 'Is array:', Array.isArray(result), 'Type:', typeof result);
+        if (result === null) console.warn('listUserJobs returned null!');
+      })
+      .catch(err => console.error('listUserJobs failed:', err));
+    
+    rpc('listUserJobEvents')
+      .then(result => {
+        console.log('listUserJobEvents result:', result, 'Is array:', Array.isArray(result), 'Type:', typeof result);
+        if (result === null) console.warn('listUserJobEvents returned null!');
+      })
+      .catch(err => console.error('listUserJobEvents failed:', err));
+  }
+
+  // Show load confirmation modal
+  function showLoadConfirmModal(title, message, dataFetcher, options) {
+    const modal = document.getElementById('loadConfirmModal');
+    const titleEl = document.getElementById('loadConfirmTitle');
+    const messageEl = document.getElementById('loadConfirmMessage');
+    const replaceBtn = document.getElementById('loadConfirmReplace');
+    const addBtn = document.getElementById('loadConfirmAdd');
+    const cancelBtn = document.getElementById('loadConfirmCancel');
+    const formContainerId = (options && options.formContainerId) || 'formRows';
+    const rowAdder = (options && options.rowAdder) || addRow;
+    const container = document.getElementById(formContainerId);
+
+    const hasExistingRows = !!(container && Array.from(container.querySelectorAll('.form-row')).some(r => !r.dataset.template && !r.classList.contains('header')));
+
+    titleEl.textContent = title;
+    messageEl.textContent = message;
+
+    if (!hasExistingRows) {
+      showSpinner(true);
+      dataFetcher()
+        .then(rows => {
+          sortTimetableRows(rows).forEach((r, index) => {
+            console.log(`Adding row ${index}:`, r);
+            rowAdder(r);
+          });
+          showInlineStatus('addStatusMessage', 'Loaded ' + ((rows || []).length) + ' timetable row(s).', 'success');
+        })
+        .catch(err => { console.error('Loading timetable failed', err); showInlineStatus('addStatusMessage', 'Failed to load timetable rows.', 'danger'); alert('Failed to load timetable.'); })
+        .finally(() => showSpinner(false));
+      return;
+    }
+
+    modal.style.display = '';
+
+    // Remove existing event listeners
+    const newReplaceBtn = replaceBtn.cloneNode(true);
+    const newAddBtn = addBtn.cloneNode(true);
+    const newCancelBtn = cancelBtn.cloneNode(true);
+    replaceBtn.parentNode.replaceChild(newReplaceBtn, replaceBtn);
+    addBtn.parentNode.replaceChild(newAddBtn, addBtn);
+    cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
+
+    function hideModal() {
+      modal.style.display = 'none';
+    }
+
+    function loadData(shouldReplace) {
+      hideModal();
+      showSpinner(true);
+      dataFetcher()
+        .then(rows => {
+          console.log('Timetable data response:', rows);
+          console.log('Available periods for comparison:', state.periods);
+          
+          const container = document.getElementById(formContainerId);
+          
+          if (shouldReplace) {
+            // clear existing non-template rows
+            const existing = Array.from(container.querySelectorAll('.form-row')).filter(r => !r.dataset.template && !r.classList.contains('header'));
+            existing.forEach(r => r.remove());
+          }
+          
+          // Add rows
+          sortTimetableRows(rows).forEach((r, index) => {
+            console.log(`Adding row ${index}:`, r);
+            rowAdder(r);
+          });
+          
+          // Verify what was actually added to the form
+          setTimeout(() => {
+            const formData = collectFormData();
+            console.log('Form data after loading timetable:', formData);
+          }, 100);
+          showInlineStatus('addStatusMessage', 'Loaded ' + ((rows || []).length) + ' timetable row(s).', 'success');
+        })
+        .catch(err => { console.error('Loading timetable failed', err); showInlineStatus('addStatusMessage', 'Failed to load timetable rows.', 'danger'); alert('Failed to load timetable.'); })
+        .finally(() => showSpinner(false));
+    }
+
+    newReplaceBtn.addEventListener('click', () => loadData(true));
+    newAddBtn.addEventListener('click', () => loadData(false));
+    newCancelBtn.addEventListener('click', hideModal);
+
+    // Close modal when clicking outside
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) hideModal();
+    });
+  }
+
+  // ===== UPDATE TAB EVENT WIRING =====
+  function initUpdateTab() {
+    // Add row
+    document.getElementById('updateAddRowBtn').addEventListener('click', function() { addUpdateRow(); });
+
+    // Load My Timetable
+    document.getElementById('updateLoadMyTimetableBtn').addEventListener('click', function() {
+      showInlineStatus('updateStatusMessage', '', '');
+      showUpdateLoadConfirmModal('Load My Timetable', 'Load your own timetable?', function() {
+        return rpc('getInitialData').then(function(data) { return data.userTimetable || []; });
+      });
+    });
+
+    // Load Teacher Timetable
+    try {
+      var otherSelect = document.getElementById('updateOtherTeacherSelect');
+      var loadOtherBtn = document.getElementById('updateLoadOtherBtn');
+      if (otherSelect && loadOtherBtn) {
+        loadOtherBtn.addEventListener('click', function() {
+          var email = (otherSelect.value || '').trim();
+          if (!email) { showInlineStatus('updateStatusMessage', 'Select a teacher timetable first.', 'warning'); return; }
+          showUpdateLoadConfirmModal('Load Teacher Timetable', 'Load timetable for ' + otherSelect.options[otherSelect.selectedIndex].text + '?', function() { return rpc('getTeacherTimetable', email); });
+        });
+      }
+    } catch (e) {}
+
+    // Load Class Timetable
+    try {
+      var classSelect = document.getElementById('updateClassSelect');
+      var loadClassBtn = document.getElementById('updateLoadClassBtn');
+      if (classSelect && loadClassBtn) {
+        loadClassBtn.addEventListener('click', function() {
+          var className = (classSelect.value || '').trim();
+          if (!className) { showInlineStatus('updateStatusMessage', 'Select a class timetable first.', 'warning'); return; }
+          showUpdateLoadConfirmModal('Load Class Timetable', 'Load timetable for ' + className + '?', function() { return rpc('getClassTimetable', className); });
+        });
+      }
+    } catch (e) {}
+
+    // Load Room Timetable
+    try {
+      var roomSelect = document.getElementById('updateRoomSelect');
+      var loadRoomBtn = document.getElementById('updateLoadRoomBtn');
+      if (roomSelect && loadRoomBtn) {
+        loadRoomBtn.addEventListener('click', function() {
+          var roomName = (roomSelect.value || '').trim();
+          if (!roomName) { showInlineStatus('updateStatusMessage', 'Select a room timetable first.', 'warning'); return; }
+          showUpdateLoadConfirmModal('Load Room Timetable', 'Load timetable for ' + roomName + '?', function() { return rpc('getRoomTimetable', roomName); });
+        });
+      }
+    } catch (e) {}
+
+    // Preview button - compare existing with generated events
+    document.getElementById('updatePreviewBtn').addEventListener('click', function() {
+      var data = collectUpdateFormData();
+      if (!data.length) { showInlineStatus('updateStatusMessage', 'Please enter or load at least one timetable row before previewing.', 'warning'); return; }
+      var calId = document.getElementById('updateCalendarSelect').value;
+      if (!calId) { showInlineStatus('updateStatusMessage', 'Please select a Schoogle calendar first.', 'warning'); return; }
+      var from = document.getElementById('updateFromDate').value;
+      var to = document.getElementById('updateToDate').value;
+      showSpinner(true);
+      Promise.all([
+        rpc('generatePreviewEvents', { items: data, from: from, to: to }),
+        rpc('getEventsFromCalendarInRange', calId, from, to)
+      ]).then(function(results) {
+        var previewResult = results[0];
+        var existingEvents = results[1] || [];
+        // Normalize preview events
+        var previewEvents = [];
+        if (Array.isArray(previewResult)) previewEvents = previewResult;
+        else if (previewResult && Array.isArray(previewResult.events)) previewEvents = previewResult.events;
+        else if (previewResult && typeof previewResult === 'object') {
+          var keys = Object.keys(previewResult);
+          for (var k = 0; k < keys.length; k++) {
+            if (Array.isArray(previewResult[keys[k]])) { previewEvents = previewResult[keys[k]]; break; }
+          }
+        }
+        var comparison = compareEvents(existingEvents, previewEvents);
+        state.updateComparison = comparison;
+        state.updateCalendarId = calId;
+        document.getElementById('updateFormSection').style.display = 'none';
+        document.getElementById('updateCompareSection').style.display = '';
+        setStepperProgress('updateStepper', 2);
+        showInlineStatus('updateStatusMessage', 'Step 2: Review differences, then apply selected updates.', 'info');
+        renderUpdateComparison(comparison);
+      }).catch(function(err) {
+        console.error('Update preview failed', err);
+        showInlineStatus('updateStatusMessage', 'Failed to generate comparison. Please check your date range and timetable rows.', 'danger');
+        alert('Failed to generate comparison: ' + (err && err.message ? err.message : err));
+      }).finally(function() { showSpinner(false); });
+    });
+
+    // Back button
+    document.getElementById('updateBackBtn').addEventListener('click', function() {
+      document.getElementById('updateCompareSection').style.display = 'none';
+      document.getElementById('updateFormSection').style.display = '';
+      setStepperProgress('updateStepper', 1);
+    });
+
+    // Select All checkbox
+    document.getElementById('updateSelectAll').addEventListener('change', function(e) {
+      var checked = e.target.checked;
+      document.querySelectorAll('#updateUnmatchedSection input[type="checkbox"].update-item-check').forEach(function(cb) { cb.checked = checked; });
+    });
+
+    // Delete and Create All button
+    document.getElementById('updateDeleteCreateAllBtn').addEventListener('click', function() {
+      var comparison = state.updateComparison;
+      var calId = state.updateCalendarId;
+      if (!comparison || !calId) return;
+
+      var checkedBoxes = document.querySelectorAll('#updateUnmatchedSection input[type="checkbox"].update-item-check:checked');
+      var items = [];
+      checkedBoxes.forEach(function(cb) { items.push({ type: cb.dataset.type, index: parseInt(cb.dataset.index) }); });
+      if (!items.length) { alert('No items selected.'); return; }
+
+      var toDelete = [];
+      var toCreate = [];
+      items.forEach(function(item) {
+        if (item.type === 'orphaned') {
+          toDelete.push(comparison.orphanedExisting[item.index]);
+        } else if (item.type === 'mismatched') {
+          toDelete.push(comparison.mismatched[item.index].existing);
+          toCreate.push(comparison.mismatched[item.index].preview);
+        } else if (item.type === 'new') {
+          toCreate.push(comparison.newPreview[item.index]);
+        }
+      });
+
+      if (!confirm('This will delete ' + toDelete.length + ' existing event(s) and create ' + toCreate.length + ' new event(s). Proceed?')) return;
+
+      setStepperProgress('updateStepper', 3);
+      showInlineStatus('updateStatusMessage', 'Step 3: Applying selected updates...', 'info');
+      showSpinner(true);
+      var deletePromise = toDelete.length > 0
+        ? rpc('deleteEventsByIds', calId, toDelete.map(function(ev) { return ev.id; }))
+        : Promise.resolve({ deleted: 0 });
+
+      deletePromise.then(function(deleteResult) {
+        if (toCreate.length > 0) {
+          var payloadEvents = toCreate.map(function(ev) {
+            var copy = Object.assign({}, ev);
+            try { if (copy.startDate && copy.startTime) copy.startDateTime = new Date(copy.startDate + 'T' + copy.startTime + ':00').toISOString(); } catch(e) {}
+            try { if (copy.startDate && copy.endTime) copy.endDateTime = new Date(copy.startDate + 'T' + copy.endTime + ':00').toISOString(); } catch(e) {}
+            return copy;
+          });
+          return rpc('ensureUserWorkerTrigger')
+            .then(function() { return rpc('enqueueJob', payloadEvents, calId); })
+            .then(function(jobId) {
+              showInlineStatus('updateStatusMessage', 'Deleted ' + (deleteResult.deleted || 0) + ' event(s). Queued ' + toCreate.length + ' event(s) for creation (Job: ' + jobId + ').', 'success');
+              try { startJobsPoller(); } catch(e) {}
+              try { rpc('processUserJobs').catch(function(){}); } catch(e) {}
+            });
+        } else {
+          showInlineStatus('updateStatusMessage', 'Deleted ' + (deleteResult.deleted || 0) + ' event(s). No new events to create.', 'success');
+        }
+      }).then(function() {
+        // Go back to form
+        document.getElementById('updateCompareSection').style.display = 'none';
+        document.getElementById('updateFormSection').style.display = '';
+        setStepperProgress('updateStepper', 1);
+      }).catch(function(err) {
+        console.error('Delete and create failed', err);
+        showInlineStatus('updateStatusMessage', 'Update operation failed. Please retry.', 'danger');
+        alert('Operation failed: ' + (err && err.message ? err.message : err));
+      }).finally(function() { showSpinner(false); });
+    });
+  }
+  // Wire up update tab when DOM is ready
+  try { initUpdateTab(); } catch(e) { console.warn('initUpdateTab failed', e); }
+
+  window.addEventListener('load', init);
+})();
+</script>
