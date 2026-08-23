@@ -112,7 +112,7 @@ function getInitialData() {
   var periodSheet = ss.getSheetByName(SHEET_PERIOD_NAMES);
   if (periodSheet) {
     var pVals = periodSheet.getDataRange().getValues();
-    for (var i = 1; i < pVals.length; i++) {
+    for (var i = 0; i < pVals.length; i++) {
       var pid = (pVals[i][0] || '').toString().trim();
       var ptxt = (pVals[i][1] || '').toString().trim();
       if (pid && ptxt) periods.push({ id: pid, text: ptxt });
